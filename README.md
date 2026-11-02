@@ -124,14 +124,30 @@ Le diagramme représente le processus de préinscription et d'inscription au cyc
 7. Les candidats admis préparent leurs dossiers définitifs.
 8. L'administration vérifie les pièces et valide les inscriptions conformes.
 
+
 ## 7. Technologies et outils
 
-- Google AI Studio : conception et prototypage de l'application.
-- GitHub : hébergement et gestion du code source.
-- UML : modélisation du processus.
-- Markdown : documentation du projet.
+### Frontend
+- React.js
+- TypeScript
+- Vite
+- Tailwind CSS
+- Lucide React (icônes)
+- Motion (animations)
 
-Les technologies exactes utilisées par l'application sont à préciser après vérification du code source.
+### Backend et intégrations
+- Express.js (dépendance du projet)
+- Google GenAI SDK
+
+### Outils de développement
+- Google AI Studio
+- Git et GitHub
+- UML
+- Markdown
+
+### Architecture
+Application web développée avec React et TypeScript,
+utilisant Vite pour le développement et la compilation.
 
 ## 8. Statut du projet
 
@@ -143,7 +159,7 @@ Ce projet présente les interfaces et les parcours principaux de gestion du cycl
 
 Projet réalisé dans un cadre pédagogique.
 
-**Auteur :** À compléter.
+**Auteur :** **Mohammed Eddarraz**.
 
 ---
 
