@@ -1,0 +1,8 @@
+{
+  "name": "Remix GCD USMBA — Gestion du Cycle Doctoral",
+  "description": "Plateforme de préinscription, de sélection et d\u0027inscription administrative au cycle doctoral de l\u0027Université Sidi Mohamed Ben Abdellah (USMBA - Fès).",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
