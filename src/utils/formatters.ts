@@ -1,16 +1,27 @@
-import {
+import type {
   ApplicationStatus,
   CampaignConfig,
   CandidateDossier,
+  DocumentCorrectionRequest,
   DocumentRequirement,
   DocumentStatus,
   SubjectChoice,
   SubjectChoiceStatus,
   ThesisSubject,
-} from '../types/gcd';
+} from '../types/gcd.ts';
 
 export function formatDateFR(dateStr?: string, withTime = false): string {
   if (!dateStr) return '—';
+  // Handle YYYY-MM-DD cleanly without timezone shift
+  if (!withTime && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const localDate = new Date(y, m - 1, d);
+    return new Intl.DateTimeFormat('fr-FR', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+    }).format(localDate);
+  }
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return dateStr;
   if (withTime) {
@@ -27,6 +38,113 @@ export function formatDateFR(dateStr?: string, withTime = false): string {
     month: 'long',
     year: 'numeric',
   }).format(date);
+}
+
+export function getTodayISO(now: Date = new Date()): string {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function addDaysISO(baseDateISO: string, daysToAdd: number): string {
+  const parts = baseDateISO.slice(0, 10).split('-').map(Number);
+  const base =
+    parts.length === 3 && !parts.some((n) => Number.isNaN(n))
+      ? new Date(parts[0], parts[1] - 1, parts[2])
+      : new Date();
+  base.setDate(base.getDate() + daysToAdd);
+  return getTodayISO(base);
+}
+
+export function diffInCalendarDays(deadlineISO: string, referenceISO?: string): number | null {
+  if (!deadlineISO || !/^\d{4}-\d{2}-\d{2}/.test(deadlineISO)) return null;
+  const [dy, dm, dd] = deadlineISO.slice(0, 10).split('-').map(Number);
+  const refStr = referenceISO && /^\d{4}-\d{2}-\d{2}/.test(referenceISO)
+    ? referenceISO.slice(0, 10)
+    : getTodayISO();
+  const [ry, rm, rd] = refStr.split('-').map(Number);
+  const targetMs = Date.UTC(dy, dm - 1, dd);
+  const refMs = Date.UTC(ry, rm - 1, rd);
+  return Math.round((targetMs - refMs) / 86_400_000);
+}
+
+export interface DeadlineInfo {
+  daysLeft: number;
+  isExpired: boolean;
+  isUrgent: boolean;
+  isWarning: boolean;
+  shortCountdown: string;
+  statusLabel: string;
+  textClass: string;
+}
+
+export function computeDeadlineInfo(deadlineISO?: string, referenceISO?: string): DeadlineInfo | null {
+  if (!deadlineISO) return null;
+  const daysLeft = diffInCalendarDays(deadlineISO, referenceISO);
+  if (daysLeft === null) return null;
+
+  if (daysLeft < 0) {
+    const overdue = Math.abs(daysLeft);
+    return {
+      daysLeft,
+      isExpired: true,
+      isUrgent: true,
+      isWarning: false,
+      shortCountdown: `Expiré (${overdue} j)`,
+      statusLabel:
+        overdue === 1
+          ? 'Délai expiré depuis 1 jour'
+          : `Délai expiré depuis ${overdue} jours`,
+      textClass: 'text-red-700',
+    };
+  }
+
+  if (daysLeft === 0) {
+    return {
+      daysLeft: 0,
+      isExpired: false,
+      isUrgent: true,
+      isWarning: true,
+      shortCountdown: 'Aujourd’hui (J-0)',
+      statusLabel: 'Expire aujourd’hui',
+      textClass: 'text-red-700',
+    };
+  }
+
+  if (daysLeft <= 3) {
+    return {
+      daysLeft,
+      isExpired: false,
+      isUrgent: true,
+      isWarning: true,
+      shortCountdown: `J-${daysLeft}`,
+      statusLabel: `${daysLeft} jour${daysLeft > 1 ? 's' : ''} restant${daysLeft > 1 ? 's' : ''} (J-${daysLeft})`,
+      textClass: 'text-amber-700',
+    };
+  }
+
+  if (daysLeft <= 7) {
+    return {
+      daysLeft,
+      isExpired: false,
+      isUrgent: false,
+      isWarning: true,
+      shortCountdown: `J-${daysLeft}`,
+      statusLabel: `${daysLeft} jours restants (J-${daysLeft})`,
+      textClass: 'text-amber-700',
+    };
+  }
+
+  return {
+    daysLeft,
+    isExpired: false,
+    isUrgent: false,
+    isWarning: false,
+    shortCountdown: `J-${daysLeft}`,
+    statusLabel: `${daysLeft} jours restants`,
+    textClass: 'text-slate-600',
+  };
 }
 
 export function formatFileSize(kb: number): string {
@@ -122,9 +240,6 @@ export function getStatusPresentation(status: ApplicationStatus | SubjectChoiceS
   }
 }
 
-/**
- * Calcule le statut global d'un dossier candidat à partir de l'état de ses 3 choix de sujets.
- */
 export function deriveGlobalDossierStatus(
   choices: SubjectChoice[],
   currentStatus: ApplicationStatus
@@ -176,6 +291,14 @@ export function getDocStatusPresentation(status: DocumentStatus): {
   }
 }
 
+export interface DossierCorrectionDiag {
+  requirement: DocumentRequirement;
+  comment: string;
+  deadline?: string;
+  deadlineInfo?: DeadlineInfo | null;
+  request?: DocumentCorrectionRequest;
+}
+
 export interface DossierDiagnostics {
   completionPercent: number;
   personalMissing: string[];
@@ -188,9 +311,18 @@ export interface DossierDiagnostics {
   motivationMissing: boolean;
   missingPreinscriptionDocs: DocumentRequirement[];
   missingInscriptionDocs: DocumentRequirement[];
-  docsToCorrect: { requirement: DocumentRequirement; comment: string }[];
+  docsToCorrect: DossierCorrectionDiag[];
   canSubmitPreinscription: boolean;
   canSubmitEnrollment: boolean;
+}
+
+export function getActiveCorrectionRequest(
+  dossier: CandidateDossier,
+  requirementId: string
+): DocumentCorrectionRequest | undefined {
+  return (dossier.correctionRequests || []).find(
+    (req) => req.requirementId === requirementId && req.status === 'pending'
+  );
 }
 
 export function computeDossierDiagnostics(
@@ -243,7 +375,6 @@ export function computeDossierDiagnostics(
   const validChoices = (dossier.subjectChoices || []).filter((c) =>
     subjects.some((s) => s.id === c.subjectId)
   );
-  // Count distinct valid subjects
   const distinctSubjectIds = Array.from(new Set(validChoices.map((c) => c.subjectId)));
   const selectedSubjectsCount = distinctSubjectIds.length;
   const subjectsMissingCount = Math.max(0, requiredSubjectsCount - selectedSubjectsCount);
@@ -265,20 +396,50 @@ export function computeDossierDiagnostics(
     (req) => !dossier.documents.some((d) => d.requirementId === req.id)
   );
 
-  const docsToCorrect: { requirement: DocumentRequirement; comment: string }[] = [];
+  const docsToCorrectMap = new Map<string, DossierCorrectionDiag>();
+
   for (const doc of dossier.documents) {
     if (doc.status === 'a_corriger') {
       const req = config.documentRequirements.find((r) => r.id === doc.requirementId);
+      const activeReq = getActiveCorrectionRequest(dossier, doc.requirementId);
+      const deadline = activeReq?.deadline || doc.correctionDeadline;
       if (req) {
-        docsToCorrect.push({
+        docsToCorrectMap.set(req.id, {
           requirement: req,
-          comment: doc.reviewComment || 'Merci de fournir une version lisible et conforme.',
+          comment:
+            activeReq?.reason ||
+            doc.reviewComment ||
+            'Merci de déposer une version lisible et conforme.',
+          deadline,
+          deadlineInfo: computeDeadlineInfo(deadline),
+          request: activeReq,
         });
       }
     }
   }
 
-  // Compute weighted completion percentage for preinscription
+  // Also include pending correction requests on missing documents (Section 2: document manquant signalé)
+  for (const corrReq of dossier.correctionRequests || []) {
+    if (corrReq.status === 'pending' && !docsToCorrectMap.has(corrReq.requirementId)) {
+      const req = config.documentRequirements.find((r) => r.id === corrReq.requirementId);
+      if (req) {
+        docsToCorrectMap.set(req.id, {
+          requirement: req,
+          comment: corrReq.reason,
+          deadline: corrReq.deadline,
+          deadlineInfo: computeDeadlineInfo(corrReq.deadline),
+          request: corrReq,
+        });
+      }
+    }
+  }
+
+  const docsToCorrect = Array.from(docsToCorrectMap.values()).sort((a, b) => {
+    const da = a.deadlineInfo?.daysLeft ?? 999;
+    const db = b.deadlineInfo?.daysLeft ?? 999;
+    return da - db;
+  });
+
   const totalChecks = 4 + preReqs.length;
   let passedChecks = 0;
   if (personalMissing.length === 0) passedChecks += 1;

@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import {
+  Bell,
   ChevronRight,
   LogOut,
   Menu,
   RotateCcw,
-  Users,
+  WifiOff,
   X,
 } from 'lucide-react';
 import { useGCD } from '../context/GCDContext';
@@ -35,16 +36,28 @@ export const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
   headerAction,
   children,
 }) => {
-  const { currentUser, accounts, loginAsAccount, logout, resetDemoData } = useGCD();
+  const {
+    currentUser,
+    accounts,
+    notifications,
+    syncMode,
+    loginAsAccount,
+    logout,
+    resetDemoData,
+  } = useGCD();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
 
   const activeNav = navItems.find((item) => item.id === activeTab);
+  const hasNotificationsTab = navItems.some((item) => item.id === 'notifications');
+  const unreadCount = notifications.filter((n) => !n.read).length;
+  const hasUrgentUnread = notifications.some((n) => !n.read && (n.urgent || n.actionRequired));
 
   const quickDemoAccounts = [
     accounts.find((a) => a.id === 'acc-cand-1'),
     accounts.find((a) => a.id === 'acc-cand-2'),
     accounts.find((a) => a.id === 'acc-cand-3'),
+    accounts.find((a) => a.id === 'acc-cand-4'),
     accounts.find((a) => a.id === 'acc-cand-5'),
     accounts.find((a) => a.id === 'acc-comm-1'),
     accounts.find((a) => a.id === 'acc-admin-1'),
@@ -52,28 +65,30 @@ export const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
 
   const renderSidebarContent = () => (
     <div className="flex flex-col h-full bg-white border-r border-slate-200">
-      {/* Brand & Role Header */}
-      <div className="px-4 py-3.5 border-b border-slate-200 space-y-2 shrink-0">
+      {/* Institutional Brand */}
+      <div className="px-4 py-4 border-b border-slate-200 space-y-2 shrink-0">
         <div className="flex items-center justify-between gap-2">
-          <UsmbaLogo variant="full" className="h-8" />
+          <div className="flex items-center gap-2.5 min-w-0">
+            <UsmbaLogo variant="emblem" className="h-8" />
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-slate-900 truncate">GCD USMBA</p>
+              <p className="text-[11px] text-slate-500 truncate">USMBA – Fès</p>
+            </div>
+          </div>
           <button
             type="button"
             onClick={() => setMobileSidebarOpen(false)}
-            aria-label="Fermer la navigation"
+            aria-label="Fermer le menu"
             className="lg:hidden p-1.5 text-slate-500 hover:text-slate-900 rounded-md"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="flex items-center gap-1.5 text-xs text-slate-600 truncate">
-          <span className="font-bold text-slate-900">GCD</span>
-          <span aria-hidden="true">·</span>
-          <span className="truncate font-medium">{workspaceTitle}</span>
-        </div>
+        <p className="text-xs font-semibold text-blue-700 truncate">{workspaceTitle}</p>
       </div>
 
-      {/* Navigation Links */}
-      <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
+      {/* Navigation */}
+      <nav className="flex-1 p-3 space-y-0.5 overflow-y-auto">
         {navItems.map((item) => {
           const isActive = item.id === activeTab;
           return (
@@ -84,10 +99,10 @@ export const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
                 onSelectTab(item.id);
                 setMobileSidebarOpen(false);
               }}
-              className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors ${
+              className={`w-full flex items-center justify-between gap-3 px-3 py-2 text-sm rounded-lg transition-colors cursor-pointer ${
                 isActive
                   ? 'bg-blue-50 text-blue-800 font-semibold'
-                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
               }`}
             >
               <span className="flex items-center gap-2.5 truncate">
@@ -111,125 +126,120 @@ export const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
         })}
       </nav>
 
-      {/* Demo Switcher & Account Footer */}
-      <div className="p-3 border-t border-slate-200 space-y-2 bg-slate-50/70">
-        <div className="px-2 py-1.5">
+      {/* Account & Discreet Demo Switcher */}
+      <div className="p-3 border-t border-slate-200 space-y-2 bg-slate-50/60">
+        <div className="px-2 py-1">
           <p className="text-xs font-semibold text-slate-900 truncate">
             {currentUser?.fullName}
           </p>
-          <p className="text-xs text-slate-500 truncate">{currentUser?.email}</p>
+          <p className="text-[11px] text-slate-500 truncate font-mono">{currentUser?.email}</p>
         </div>
 
         <button
           type="button"
-          onClick={() => setSwitcherOpen((v) => !v)}
-          className="w-full px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors flex items-center justify-between"
-        >
-          <span className="flex items-center gap-1.5 truncate">
-            <Users className="w-3.5 h-3.5 text-blue-700 shrink-0" />
-            Changer d’espace (Démo)
-          </span>
-          <ChevronRight
-            className={`w-3.5 h-3.5 transition-transform duration-150 ${
-              switcherOpen ? 'rotate-90' : ''
-            }`}
-          />
-        </button>
-
-        {switcherOpen && (
-          <div className="p-2 bg-white border border-slate-200 rounded-lg space-y-1 max-h-52 overflow-y-auto">
-            {quickDemoAccounts.map((acc) => {
-              if (!acc) return null;
-              const isCurrent = acc.id === currentUser?.id;
-              const rolePrefix =
-                acc.role === 'candidat'
-                  ? 'Candidat'
-                  : acc.role === 'commission'
-                  ? 'Commission'
-                  : 'Admin';
-              return (
-                <button
-                  key={acc.id}
-                  type="button"
-                  onClick={() => {
-                    loginAsAccount(acc.id);
-                    setSwitcherOpen(false);
-                    setMobileSidebarOpen(false);
-                  }}
-                  className={`w-full text-left px-2.5 py-1.5 rounded-md text-xs transition-colors ${
-                    isCurrent
-                      ? 'bg-blue-50 text-blue-800 font-semibold'
-                      : 'text-slate-700 hover:bg-slate-100'
-                  }`}
-                >
-                  <div className="truncate">
-                    {rolePrefix} · {acc.fullName}
-                  </div>
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => {
-                resetDemoData();
-                setSwitcherOpen(false);
-              }}
-              className="w-full text-left px-2.5 py-1.5 rounded-md text-xs text-slate-500 hover:text-slate-900 hover:bg-slate-100 flex items-center gap-1.5 border-t border-slate-100 mt-1 pt-2"
-            >
-              <RotateCcw className="w-3 h-3" />
-              Réinitialiser les données démo
-            </button>
-          </div>
-        )}
-
-        <button
-          type="button"
           onClick={logout}
-          className="w-full px-3 py-2 text-xs font-medium text-slate-600 hover:text-red-700 hover:bg-red-50/60 rounded-lg transition-colors flex items-center gap-2"
+          className="w-full px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-red-50/70 hover:text-red-700 border border-slate-200 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
         >
           <LogOut className="w-3.5 h-3.5" />
-          Retour au portail / Déconnexion
+          <span>Déconnexion</span>
         </button>
+
+        <div className="pt-1 border-t border-slate-200/80">
+          <button
+            type="button"
+            onClick={() => setSwitcherOpen((v) => !v)}
+            className="w-full px-2 py-1 text-[11px] text-slate-500 hover:text-slate-800 flex items-center justify-between cursor-pointer"
+          >
+            <span>Comptes démo</span>
+            <ChevronRight
+              className={`w-3 h-3 transition-transform duration-150 ${
+                switcherOpen ? 'rotate-90' : ''
+              }`}
+            />
+          </button>
+
+          {switcherOpen && (
+            <div className="mt-1.5 p-1.5 bg-white border border-slate-200 rounded-lg space-y-0.5 max-h-48 overflow-y-auto">
+              {quickDemoAccounts.map((acc) => {
+                if (!acc) return null;
+                const isCurrent = acc.id === currentUser?.id;
+                const rolePrefix =
+                  acc.role === 'candidat'
+                    ? 'Candidat'
+                    : acc.role === 'commission'
+                    ? 'Commission'
+                    : 'Admin';
+                return (
+                  <button
+                    key={acc.id}
+                    type="button"
+                    onClick={() => {
+                      loginAsAccount(acc.id);
+                      setSwitcherOpen(false);
+                      setMobileSidebarOpen(false);
+                    }}
+                    className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors cursor-pointer ${
+                      isCurrent
+                        ? 'bg-blue-50 text-blue-800 font-semibold'
+                        : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="block truncate">
+                      {rolePrefix} · {acc.fullName}
+                    </span>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => {
+                  resetDemoData();
+                  setSwitcherOpen(false);
+                }}
+                className="w-full text-left px-2 py-1.5 rounded text-[11px] text-slate-500 hover:text-slate-900 hover:bg-slate-100 flex items-center gap-1.5 border-t border-slate-100 mt-1 pt-1.5 cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Réinitialiser les données</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
-      {/* Desktop Sidebar */}
-      <aside className="hidden lg:block w-64 shrink-0 sticky top-0 h-screen">
+      <aside className="hidden lg:block w-60 shrink-0 sticky top-0 h-screen">
         {renderSidebarContent()}
       </aside>
 
-      {/* Mobile Drawer Sidebar */}
       {mobileSidebarOpen && (
         <div className="fixed inset-0 z-50 lg:hidden flex">
           <div
             className="fixed inset-0 bg-slate-900/50"
             onClick={() => setMobileSidebarOpen(false)}
           />
-          <div className="relative w-72 max-w-[85vw] h-full z-10">
+          <div className="relative w-64 max-w-[85vw] h-full z-10">
             {renderSidebarContent()}
           </div>
         </div>
       )}
 
-      {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top Workspace Header (compact h-14) */}
         <header className="sticky top-0 z-20 h-14 bg-white/95 backdrop-blur-xs border-b border-slate-200 px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileSidebarOpen(true)}
-              aria-label="Ouvrir la navigation"
+              aria-label="Ouvrir le menu"
               className="lg:hidden p-2 -ml-2 text-slate-600 hover:text-slate-900 rounded-lg"
             >
               <Menu className="w-5 h-5" />
             </button>
             <UsmbaLogo variant="emblem" className="h-7 lg:hidden" />
             <div className="flex items-center gap-2 text-xs sm:text-sm text-slate-500 truncate">
-              <span className="hidden sm:inline font-medium text-slate-700 whitespace-nowrap">
+              <span className="hidden sm:inline font-medium text-slate-600 whitespace-nowrap">
                 {workspaceTitle}
               </span>
               <ChevronRight className="hidden sm:inline w-4 h-4 text-slate-400 shrink-0" />
@@ -239,7 +249,39 @@ export const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">{headerAction}</div>
+          <div className="flex items-center gap-2.5 shrink-0">
+            {syncMode === 'local_only' && (
+              <span
+                title="Mode hors ligne local"
+                className="hidden sm:inline-flex items-center gap-1 text-[11px] font-medium text-amber-700"
+              >
+                <WifiOff className="w-3.5 h-3.5" />
+                <span>Hors ligne</span>
+              </span>
+            )}
+
+            {hasNotificationsTab && (
+              <button
+                type="button"
+                onClick={() => onSelectTab('notifications')}
+                aria-label={`Notifications (${unreadCount} non lues)`}
+                className={`relative px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors inline-flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'notifications'
+                    ? 'bg-blue-50 border-blue-200 text-blue-800'
+                    : unreadCount > 0 && hasUrgentUnread
+                    ? 'bg-red-50/70 border-red-200 text-red-800 hover:bg-red-100/70'
+                    : unreadCount > 0
+                    ? 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50'
+                    : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+                }`}
+              >
+                <Bell className="w-4 h-4" />
+                <span className="font-mono tabular-nums">{unreadCount}</span>
+              </button>
+            )}
+
+            {headerAction}
+          </div>
         </header>
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-6xl w-full mx-auto">

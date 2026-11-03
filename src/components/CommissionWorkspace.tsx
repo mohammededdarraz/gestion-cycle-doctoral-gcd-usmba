@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Award,
+  Bell,
   Calendar,
   CheckCircle2,
   ClipboardCheck,
@@ -9,6 +11,7 @@ import {
   FileText,
   HelpCircle,
   Layers,
+  RotateCcw,
   Search,
   UserCheck,
   Users,
@@ -23,15 +26,25 @@ import {
   UploadedDocument,
 } from '../types/gcd';
 import {
+  addDaysISO,
+  computeDeadlineInfo,
   formatDateFR,
   formatFileSize,
+  getActiveCorrectionRequest,
   getDocStatusPresentation,
   getStatusPresentation,
+  getTodayISO,
 } from '../utils/formatters';
 import { HelpCenter } from './HelpCenter';
 import { NavItem, WorkspaceShell } from './WorkspaceShell';
 
-type CommissionTab = 'sujets_groupes' | 'candidatures' | 'entretiens' | 'classement' | 'aide';
+type CommissionTab =
+  | 'sujets_groupes'
+  | 'candidatures'
+  | 'entretiens'
+  | 'classement'
+  | 'notifications'
+  | 'aide';
 
 interface CandidatureEntry {
   key: string;
@@ -64,27 +77,33 @@ export const CommissionWorkspace: React.FC = () => {
     currentUser,
     dossiers,
     subjects,
+    notifications,
     campaignConfig,
+    navigationFocus,
+    clearNavigationFocus,
+    openNotificationTarget,
+    markNotificationRead,
+    markAllNotificationsRead,
     setPreselectionDecision,
     scheduleCandidateInterview,
     saveCandidateEvaluation,
     setCommissionFinalDecision,
     callNextOnWaitlist,
+    requestDocumentCorrection,
   } = useGCD();
 
   const [activeTab, setActiveTab] = useState<CommissionTab>('candidatures');
+  const [notifFilter, setNotifFilter] = useState<'all' | 'unread'>('all');
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>('ALL');
   const [priorityFilter, setPriorityFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Submitted/active dossiers (exclude unsubmitted drafts)
   const submittedDossiers = useMemo(
     () => dossiers.filter((d) => d.status !== 'brouillon'),
     [dossiers]
   );
 
-  // Flatten each candidate's 3 subject choices into individual commission candidatures
   const allCandidatureEntries: CandidatureEntry[] = useMemo(() => {
     const list: CandidatureEntry[] = [];
     for (const dossier of submittedDossiers) {
@@ -154,7 +173,7 @@ export const CommissionWorkspace: React.FC = () => {
     [allCandidatureEntries, filteredEntries, selectedEntryKey]
   );
 
-  // Local forms for selected (dossier, subject) candidature
+  // Evaluation & scheduling form states
   const [preselectionNote, setPreselectionNote] = useState('');
   const [intDate, setIntDate] = useState('2026-11-14');
   const [intTime, setIntTime] = useState('10:00');
@@ -166,7 +185,7 @@ export const CommissionWorkspace: React.FC = () => {
     `${currentUser?.fullName || 'Pr. Hassan Ouazzani'}, Pr. Sanae Bekkali`
   );
   const [intInstructions, setIntInstructions] = useState(
-    'Présentation orale de 10 minutes (support PDF) suivie de 15 minutes d’échanges scientifiques. Munissez-vous de votre CIN et de vos originaux.'
+    'Présentation orale de 10 minutes suivie d’échanges scientifiques.'
   );
 
   const [acadScore, setAcadScore] = useState('15.0');
@@ -182,13 +201,49 @@ export const CommissionWorkspace: React.FC = () => {
   } | null>(null);
 
   const [bannerMsg, setBannerMsg] = useState<string | null>(null);
-
-  // Ranking tab subject selection
   const [rankingSubjectId, setRankingSubjectId] = useState<string>(subjects[0]?.id || '');
+
+  // Document correction inline form state (Commission)
+  const [commCorrReqId, setCommCorrReqId] = useState<string | null>(null);
+  const [commCorrReason, setCommCorrReason] = useState('');
+  const [commCorrDeadline, setCommCorrDeadline] = useState(() =>
+    addDaysISO(getTodayISO(), campaignConfig.deadlinePolicy.defaultCorrectionDays)
+  );
+
+  useEffect(() => {
+    if (!navigationFocus) return;
+    const validTabs: CommissionTab[] = [
+      'sujets_groupes',
+      'candidatures',
+      'entretiens',
+      'classement',
+      'notifications',
+      'aide',
+    ];
+    if (validTabs.includes(navigationFocus.tab as CommissionTab)) {
+      setActiveTab(navigationFocus.tab as CommissionTab);
+    }
+    if (navigationFocus.dossierId) {
+      setSearchQuery('');
+      setSelectedSubjectFilter('ALL');
+      setPriorityFilter('ALL');
+      setStatusFilter('ALL');
+      if (navigationFocus.subjectId) {
+        setSelectedEntryKey(`${navigationFocus.dossierId}::${navigationFocus.subjectId}`);
+      } else {
+        const firstEntry = allCandidatureEntries.find(
+          (e) => e.dossier.id === navigationFocus.dossierId
+        );
+        if (firstEntry) setSelectedEntryKey(firstEntry.key);
+      }
+    }
+    clearNavigationFocus();
+  }, [navigationFocus, allCandidatureEntries, clearNavigationFocus]);
 
   useEffect(() => {
     if (!selectedEntry) return;
     const { dossier, choice } = selectedEntry;
+    setCommCorrReqId(null);
     setPreselectionNote(choice.preselectionNote || '');
     if (choice.interview) {
       setIntDate(choice.interview.date);
@@ -222,6 +277,19 @@ export const CommissionWorkspace: React.FC = () => {
     (e) => e.choice.status === 'soumis'
   ).length;
 
+  const unreadNotifCount = useMemo(
+    () => notifications.filter((n) => !n.read).length,
+    [notifications]
+  );
+  const hasUrgentUnread = useMemo(
+    () => notifications.some((n) => !n.read && (n.urgent || n.actionRequired)),
+    [notifications]
+  );
+  const filteredNotifications = useMemo(
+    () => (notifFilter === 'unread' ? notifications.filter((n) => !n.read) : notifications),
+    [notifications, notifFilter]
+  );
+
   const scheduledInterviews = useMemo(
     () =>
       allCandidatureEntries
@@ -236,32 +304,38 @@ export const CommissionWorkspace: React.FC = () => {
 
   const navItems: NavItem[] = [
     {
-      id: 'sujets_groupes',
-      label: 'Par sujet (Vue groupée)',
-      icon: <Layers className="w-4 h-4" />,
-      badgeCount: subjects.length,
-    },
-    {
       id: 'candidatures',
-      label: 'Examen des candidatures',
+      label: 'Candidatures',
       icon: <ClipboardCheck className="w-4 h-4" />,
       badgeCount: pendingPreselectionCount,
       badgeTone: 'neutral',
     },
     {
+      id: 'sujets_groupes',
+      label: 'Par sujet',
+      icon: <Layers className="w-4 h-4" />,
+    },
+    {
       id: 'entretiens',
-      label: 'Planning des entretiens',
+      label: 'Entretiens',
       icon: <Calendar className="w-4 h-4" />,
       badgeCount: scheduledInterviews.length,
     },
     {
       id: 'classement',
-      label: 'Évaluation & Classement',
+      label: 'Classement',
       icon: <Award className="w-4 h-4" />,
     },
     {
+      id: 'notifications',
+      label: 'Notifications',
+      icon: <Bell className="w-4 h-4" />,
+      badgeCount: unreadNotifCount,
+      badgeTone: hasUrgentUnread ? 'alert' : 'neutral',
+    },
+    {
       id: 'aide',
-      label: 'Guide & Support',
+      label: 'Aide & Support',
       icon: <HelpCircle className="w-4 h-4" />,
     },
   ];
@@ -280,7 +354,7 @@ export const CommissionWorkspace: React.FC = () => {
   const handleSaveInterview = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEntry) return;
-    scheduleCandidateInterview(
+    const { modified } = scheduleCandidateInterview(
       selectedEntry.dossier.id,
       selectedEntry.choice.subjectId,
       {
@@ -293,7 +367,9 @@ export const CommissionWorkspace: React.FC = () => {
       }
     );
     setBannerMsg(
-      `Convocation d’entretien envoyée à ${selectedEntry.dossier.personalInfo.firstName} ${selectedEntry.dossier.personalInfo.lastName} (Choix n°${selectedEntry.choice.priority} · ${selectedEntry.subject?.code || ''}) pour le ${formatDateFR(intDate)} à ${intTime}.`
+      modified
+        ? `Entretien modifié et candidat notifié (${selectedEntry.dossier.personalInfo.firstName} ${selectedEntry.dossier.personalInfo.lastName} · ${formatDateFR(intDate)} à ${intTime}).`
+        : `Convocation envoyée (${selectedEntry.dossier.personalInfo.firstName} ${selectedEntry.dossier.personalInfo.lastName} · ${formatDateFR(intDate)} à ${intTime}).`
     );
   };
 
@@ -308,11 +384,9 @@ export const CommissionWorkspace: React.FC = () => {
       a,
       o,
       evalObs,
-      currentUser?.fullName || 'Commission Pédagogique'
+      currentUser?.fullName || 'Commission'
     );
-    setBannerMsg(
-      `Évaluation enregistrée pour ${selectedEntry.dossier.personalInfo.firstName} ${selectedEntry.dossier.personalInfo.lastName} sur le sujet ${selectedEntry.subject?.code || ''}.`
-    );
+    setBannerMsg('Notes enregistrées.');
   };
 
   const handleExportSubjectCandidatesCsv = (subject: ThesisSubject) => {
@@ -335,10 +409,10 @@ export const CommissionWorkspace: React.FC = () => {
         'Diplôme Bac+5',
         'Établissement Bac+5',
         'Moyenne Bac+5 (/20)',
-        'Statut sur ce sujet',
+        'Statut',
         'Note Dossier (/20)',
         'Note Entretien (/20)',
-        'Note Finale Pondérée (/20)',
+        'Note Finale (/20)',
       ],
       entries.map(({ dossier, choice }) => [
         dossier.dossierNumber,
@@ -348,7 +422,7 @@ export const CommissionWorkspace: React.FC = () => {
         dossier.personalInfo.cne,
         dossier.personalInfo.email,
         dossier.personalInfo.phone,
-        `Choix n°${choice.priority}`,
+        `Choix ${choice.priority}`,
         subject.code,
         dossier.academicInfo.masterTitle,
         dossier.academicInfo.masterInstitution,
@@ -360,10 +434,9 @@ export const CommissionWorkspace: React.FC = () => {
       ])
     );
 
-    setBannerMsg(`Liste CSV exportée pour le sujet ${subject.code} (${entries.length} candidature(s)).`);
+    setBannerMsg(`CSV exporté (${subject.code}).`);
   };
 
-  // Ranking candidates for selected subject
   const rankingSubject = subjects.find((s) => s.id === rankingSubjectId) || subjects[0];
   const rankingEntries = useMemo(() => {
     if (!rankingSubject) return [];
@@ -377,21 +450,34 @@ export const CommissionWorkspace: React.FC = () => {
       });
   }, [allCandidatureEntries, rankingSubject]);
 
+  const hasFilters =
+    searchQuery.trim() !== '' ||
+    selectedSubjectFilter !== 'ALL' ||
+    priorityFilter !== 'ALL' ||
+    statusFilter !== 'ALL';
+
+  const resetFilters = () => {
+    setSearchQuery('');
+    setSelectedSubjectFilter('ALL');
+    setPriorityFilter('ALL');
+    setStatusFilter('ALL');
+  };
+
   return (
     <WorkspaceShell
-      workspaceTitle="Commission de Sélection"
+      workspaceTitle="Commission de sélection"
       activeTab={activeTab}
       onSelectTab={(id) => setActiveTab(id as CommissionTab)}
       navItems={navItems}
       headerAction={
-        <span className="text-xs text-slate-600 hidden sm:inline truncate max-w-xs">
-          {currentUser?.laboratoire || 'Commission Pédagogique USMBA'}
+        <span className="text-xs text-slate-500 hidden sm:inline truncate max-w-xs">
+          {currentUser?.laboratoire || 'USMBA – Fès'}
         </span>
       }
     >
-      <div className="space-y-6">
+      <div className="space-y-5">
         {bannerMsg && (
-          <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-950 flex items-center justify-between gap-4">
+          <div className="px-4 py-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs sm:text-sm text-emerald-950 flex items-center justify-between gap-4">
             <span className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
               {bannerMsg}
@@ -399,28 +485,23 @@ export const CommissionWorkspace: React.FC = () => {
             <button
               type="button"
               onClick={() => setBannerMsg(null)}
-              className="text-xs font-semibold underline shrink-0"
+              className="text-xs font-semibold underline shrink-0 cursor-pointer"
             >
               Fermer
             </button>
           </div>
         )}
 
-        {/* TAB 0: CANDIDATURES REGROUPÉES PAR SUJET (Guide Professeurs USMBA) */}
+        {/* TAB: PAR SUJET */}
         {activeTab === 'sujets_groupes' && (
-          <div className="space-y-6">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-              <div>
-                <h1 className="text-xl font-bold text-slate-900">
-                  Candidatures regroupées par sujet de thèse
-                </h1>
-                <p className="text-xs text-slate-600 mt-1">
-                  Chaque candidat sélectionne {campaignConfig.requiredSubjectChoices} sujets par ordre de priorité (Choix 1 à {campaignConfig.requiredSubjectChoices}). Consultez les effectifs par rang de vœu ou exportez la liste CSV par sujet.
-                </p>
-              </div>
-              <div className="text-xs font-mono text-slate-500 tabular-nums">
-                {submittedDossiers.length} dossiers soumis · {allCandidatureEntries.length} vœux exprimés
-              </div>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+                Candidatures par sujet
+              </h1>
+              <span className="text-xs font-mono text-slate-500 tabular-nums">
+                {submittedDossiers.length} dossiers · {allCandidatureEntries.length} vœux
+              </span>
             </div>
 
             <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -428,11 +509,10 @@ export const CommissionWorkspace: React.FC = () => {
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold">
-                      <th className="py-3 px-4">Code & Intitulé du sujet</th>
+                      <th className="py-3 px-4">Sujet</th>
                       <th className="py-3 px-4">Encadrant & Laboratoire</th>
-                      <th className="py-3 px-4">Validation (Struct. · Centre · Pôle)</th>
                       <th className="py-3 px-4 text-right">Places</th>
-                      <th className="py-3 px-4 text-right">Vœux (C1 · C2 · C3)</th>
+                      <th className="py-3 px-4 text-right">Candidatures (C1·C2·C3)</th>
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -444,56 +524,28 @@ export const CommissionWorkspace: React.FC = () => {
                       const c1 = entries.filter((e) => e.choice.priority === 1).length;
                       const c2 = entries.filter((e) => e.choice.priority === 2).length;
                       const c3 = entries.filter((e) => e.choice.priority >= 3).length;
-                      const val = suj.validationStatus || {
-                        structure: 'validee',
-                        centre: 'validee',
-                        pole: 'validee',
-                      };
 
                       return (
                         <tr key={suj.id} className="hover:bg-slate-50">
-                          <td className="py-3.5 px-4 max-w-xs">
-                            <p className="font-mono font-bold text-blue-700">{suj.code}</p>
-                            <p className="font-semibold text-slate-900 line-clamp-2 mt-0.5">
+                          <td className="py-3.5 px-4 max-w-sm">
+                            <span className="font-mono font-semibold text-blue-700">
+                              {suj.code}
+                            </span>
+                            <p className="font-semibold text-slate-900 line-clamp-1 mt-0.5">
                               {suj.title}
                             </p>
                           </td>
-                          <td className="py-3.5 px-4 max-w-[220px]">
+                          <td className="py-3.5 px-4 max-w-[240px]">
                             <p className="font-medium text-slate-900 truncate">{suj.supervisor}</p>
-                            <p className="text-slate-500 truncate mt-0.5">{suj.laboratoire}</p>
-                          </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap text-slate-600">
-                            <span
-                              className={
-                                val.structure === 'validee' ? 'text-emerald-700 font-medium' : 'text-amber-700'
-                              }
-                            >
-                              {val.structure === 'validee' ? '✓ Struct.' : '◷ Struct.'}
-                            </span>
-                            <span className="mx-1 text-slate-300">·</span>
-                            <span
-                              className={
-                                val.centre === 'validee' ? 'text-emerald-700 font-medium' : 'text-amber-700'
-                              }
-                            >
-                              {val.centre === 'validee' ? '✓ Centre' : '◷ Centre'}
-                            </span>
-                            <span className="mx-1 text-slate-300">·</span>
-                            <span
-                              className={
-                                val.pole === 'validee' ? 'text-emerald-700 font-medium' : 'text-amber-700'
-                              }
-                            >
-                              {val.pole === 'validee' ? '✓ Pôle' : '◷ Pôle'}
-                            </span>
+                            <p className="text-slate-500 truncate">{suj.laboratoire}</p>
                           </td>
                           <td className="py-3.5 px-4 text-right font-mono font-semibold text-slate-900 tabular-nums">
                             {suj.places}
                           </td>
                           <td className="py-3.5 px-4 text-right font-mono tabular-nums whitespace-nowrap">
                             <span className="font-bold text-slate-900">{entries.length}</span>{' '}
-                            <span className="text-slate-500">
-                              ({c1} · {c2} · {c3})
+                            <span className="text-slate-400">
+                              ({c1}·{c2}·{c3})
                             </span>
                           </td>
                           <td className="py-3.5 px-4 text-right whitespace-nowrap">
@@ -501,7 +553,7 @@ export const CommissionWorkspace: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={() => handleExportSubjectCandidatesCsv(suj)}
-                                className="px-2.5 py-1.5 font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors inline-flex items-center gap-1"
+                                className="px-2.5 py-1.5 font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors inline-flex items-center gap-1 cursor-pointer"
                               >
                                 <Download className="w-3.5 h-3.5" />
                                 CSV
@@ -516,7 +568,7 @@ export const CommissionWorkspace: React.FC = () => {
                                   if (first) setSelectedEntryKey(first.key);
                                   setActiveTab('candidatures');
                                 }}
-                                className="px-3 py-1.5 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-md transition-colors"
+                                className="px-3 py-1.5 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-md transition-colors cursor-pointer"
                               >
                                 Examiner ({entries.length})
                               </button>
@@ -532,127 +584,146 @@ export const CommissionWorkspace: React.FC = () => {
           </div>
         )}
 
-        {/* TAB 1: EXAMEN DES CANDIDATURES */}
+        {/* TAB: EXAMEN DES CANDIDATURES */}
         {activeTab === 'candidatures' && (
-          <div className="space-y-6">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-              <div>
-                <h1 className="text-xl font-bold text-slate-900">
-                  Examen scientifique des candidatures (par sujet et ordre de vœu)
-                </h1>
-                <p className="text-xs text-slate-600 mt-1">
-                  Examinez le cursus, les pièces déposées et les {campaignConfig.requiredSubjectChoices} sujets demandés par chaque candidat, puis statuez sur le vœu sélectionné.
-                </p>
-              </div>
-              <div className="text-xs text-slate-500 font-mono tabular-nums">
-                Règles actives : {campaignConfig.dossierWeight}% Dossier · {campaignConfig.interviewWeight}% Entretien · Seuil Master {campaignConfig.minMasterAverage}/20
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-900">Candidatures</h1>
+              <div className="flex items-center gap-3 text-xs text-slate-500">
+                {hasFilters && (
+                  <button
+                    type="button"
+                    onClick={resetFilters}
+                    className="font-medium text-blue-700 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Réinitialiser
+                  </button>
+                )}
+                <span className="font-mono tabular-nums">
+                  Pondération {campaignConfig.dossierWeight}% / {campaignConfig.interviewWeight}% · Seuil{' '}
+                  {campaignConfig.minMasterAverage}/20
+                </span>
               </div>
             </div>
 
-            {/* Filters */}
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 p-4 bg-white border border-slate-200 rounded-xl">
-              <div className="md:col-span-4 relative">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            {/* Filter Bar */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 p-3 bg-white border border-slate-200 rounded-xl">
+              <div className="sm:col-span-2 lg:col-span-4 relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Candidat, N° dossier, CNE, code sujet..."
-                  className="w-full pl-10 pr-3.5 py-2 text-sm border border-slate-200 rounded-lg"
+                  placeholder="Nom, N° dossier, CNE, CIN..."
+                  className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                 />
               </div>
-              <div className="md:col-span-4">
+              <div className="lg:col-span-4">
                 <select
                   value={selectedSubjectFilter}
                   onChange={(e) => setSelectedSubjectFilter(e.target.value)}
                   className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                 >
-                  <option value="ALL">
-                    Tous les sujets ({allCandidatureEntries.length} vœux)
-                  </option>
+                  <option value="ALL">Tous les sujets ({allCandidatureEntries.length})</option>
                   {subjects.map((s) => (
                     <option key={s.id} value={s.id}>
-                      {s.code} — {s.title.slice(0, 44)}...
+                      {s.code} — {s.title.slice(0, 42)}...
                     </option>
                   ))}
                 </select>
               </div>
-              <div className="md:col-span-2">
+              <div className="lg:col-span-2">
                 <select
                   value={priorityFilter}
                   onChange={(e) => setPriorityFilter(e.target.value)}
                   className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                 >
-                  <option value="ALL">Tous les vœux</option>
-                  <option value="1">Choix n°1</option>
-                  <option value="2">Choix n°2</option>
-                  <option value="3">Choix n°3</option>
+                  <option value="ALL">Tous les choix</option>
+                  <option value="1">Choix 1</option>
+                  <option value="2">Choix 2</option>
+                  <option value="3">Choix 3</option>
                 </select>
               </div>
-              <div className="md:col-span-2">
+              <div className="lg:col-span-2">
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
                   className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                 >
                   <option value="ALL">Tous statuts</option>
-                  <option value="soumis">Nouveaux soumis</option>
-                  <option value="en_cours">Présélectionnés</option>
-                  <option value="entretien">Convoqués</option>
+                  <option value="soumis">Soumis</option>
+                  <option value="en_cours">Présélectionné</option>
+                  <option value="entretien">Entretien</option>
                   <option value="admis">Admis</option>
                   <option value="liste_attente">Liste d’attente</option>
-                  <option value="non_retenu">Non retenus</option>
+                  <option value="non_retenu">Non retenu</option>
                 </select>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Candidature List */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              {/* Left List */}
               <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-                <div className="p-4 flex items-center justify-between text-xs font-semibold text-slate-600">
-                  <span>Vœux reçus ({filteredEntries.length})</span>
-                  <span>Moy. Bac+5</span>
+                <div className="px-4 py-3 flex items-center justify-between text-xs font-semibold text-slate-600">
+                  <span>Candidatures ({filteredEntries.length})</span>
+                  <span>Bac+5</span>
                 </div>
 
                 {filteredEntries.length === 0 ? (
-                  <div className="p-8 text-center text-sm text-slate-500">
-                    Aucune candidature ne correspond aux filtres sélectionnés.
-                  </div>
+                  <div className="p-8 text-center text-sm text-slate-500">Aucun résultat.</div>
                 ) : (
-                  <div className="divide-y divide-slate-200 max-h-[760px] overflow-y-auto">
+                  <div className="divide-y divide-slate-200 max-h-[720px] overflow-y-auto">
                     {filteredEntries.map((entry) => {
                       const { dossier: d, choice, subject: suj } = entry;
                       const isSelected = selectedEntry?.key === entry.key;
                       const st = getStatusPresentation(choice.status);
+                      const hasPendingCorr =
+                        d.documents.some((doc) => doc.status === 'a_corriger') ||
+                        (d.correctionRequests || []).some((r) => r.status === 'pending');
+                      const hasResubmitted = (d.correctionRequests || []).some(
+                        (r) => r.status === 'resubmitted'
+                      );
                       return (
                         <button
                           key={entry.key}
                           type="button"
                           onClick={() => setSelectedEntryKey(entry.key)}
-                          className={`w-full text-left p-4 transition-colors ${
+                          className={`w-full text-left px-4 py-3.5 transition-colors cursor-pointer ${
                             isSelected ? 'bg-blue-50/60' : 'hover:bg-slate-50'
                           }`}
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
-                              <p className="text-sm font-bold text-slate-900 truncate">
+                              <p className="text-sm font-semibold text-slate-900 truncate">
                                 {d.personalInfo.firstName} {d.personalInfo.lastName}
                               </p>
-                              <p className="text-xs text-slate-600 font-mono mt-0.5 truncate">
-                                Choix n°{choice.priority} ·{' '}
+                              <p className="text-xs text-slate-500 font-mono mt-0.5 truncate">
+                                Choix {choice.priority} ·{' '}
                                 <span className="font-semibold text-blue-700">
                                   {suj?.code || choice.subjectId}
-                                </span>{' '}
-                                · {d.dossierNumber}
+                                </span>
+                                {hasPendingCorr && (
+                                  <span className="text-red-700 font-sans font-medium">
+                                    {' '}
+                                    · Pièce à corriger
+                                  </span>
+                                )}
+                                {!hasPendingCorr && hasResubmitted && (
+                                  <span className="text-blue-700 font-sans font-medium">
+                                    {' '}
+                                    · Corrigé déposé
+                                  </span>
+                                )}
                               </p>
                             </div>
                             <span className="text-xs font-mono font-bold text-slate-900 tabular-nums shrink-0">
                               {d.academicInfo.masterAverage}/20
                             </span>
                           </div>
-                          <div className="mt-2 flex items-center justify-between text-xs">
+                          <div className="mt-1.5 flex items-center justify-between text-xs">
                             <span className="text-slate-500 truncate">
-                              {d.academicInfo.masterType} · {d.academicInfo.masterInstitution}
+                              {d.academicInfo.masterInstitution}
                             </span>
                             <span className={`font-semibold shrink-0 ml-2 ${st.textClass}`}>
                               {st.shortLabel}
@@ -665,14 +736,14 @@ export const CommissionWorkspace: React.FC = () => {
                 )}
               </div>
 
-              {/* Candidate Detail & Per-Subject Actions Panel */}
-              <div className="lg:col-span-7 space-y-6">
+              {/* Right Evaluation Panel */}
+              <div className="lg:col-span-7">
                 {selectedEntry ? (
                   <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-                    {/* Header */}
-                    <div className="p-6 space-y-2">
+                    {/* Candidate Header */}
+                    <div className="p-5 space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-xs font-mono font-semibold text-blue-700">
+                        <span className="text-xs font-mono text-slate-500">
                           {selectedEntry.dossier.dossierNumber} · CNE{' '}
                           {selectedEntry.dossier.personalInfo.cne} · CIN{' '}
                           {selectedEntry.dossier.personalInfo.cin}
@@ -682,19 +753,18 @@ export const CommissionWorkspace: React.FC = () => {
                             getStatusPresentation(selectedEntry.choice.status).textClass
                           }`}
                         >
-                          Statut sur ce sujet :{' '}
                           {getStatusPresentation(selectedEntry.choice.status).label}
                         </span>
                       </div>
 
                       <div className="flex flex-wrap items-baseline justify-between gap-2">
-                        <h2 className="text-xl font-bold text-slate-900">
+                        <h2 className="text-lg font-bold text-slate-900">
                           {selectedEntry.dossier.personalInfo.firstName}{' '}
                           {selectedEntry.dossier.personalInfo.lastName}
                         </h2>
                         {(selectedEntry.dossier.personalInfo.firstNameAr ||
                           selectedEntry.dossier.personalInfo.lastNameAr) && (
-                          <span className="text-sm font-medium text-slate-600" dir="rtl">
+                          <span className="text-sm text-slate-500" dir="rtl">
                             {selectedEntry.dossier.personalInfo.firstNameAr}{' '}
                             {selectedEntry.dossier.personalInfo.lastNameAr}
                           </span>
@@ -705,26 +775,16 @@ export const CommissionWorkspace: React.FC = () => {
                         {selectedEntry.dossier.personalInfo.email} ·{' '}
                         {selectedEntry.dossier.personalInfo.phone} ·{' '}
                         {selectedEntry.dossier.personalInfo.employmentStatus === 'etudiant'
-                          ? 'Étudiant(e) non salarié(e)'
+                          ? 'Étudiant(e)'
                           : `${selectedEntry.dossier.personalInfo.employmentStatus} (${
-                              selectedEntry.dossier.personalInfo.employerName ||
-                              'Employeur non précisé'
+                              selectedEntry.dossier.personalInfo.employerName || '—'
                             })`}
                       </p>
                     </div>
 
-                    {/* Active Subject Choice & Candidate's 3 Wishes Switcher */}
-                    <div className="p-6 space-y-3 bg-slate-50/60">
-                      <div className="flex items-center justify-between gap-2">
-                        <h3 className="text-xs font-bold text-slate-900">
-                          Les {selectedEntry.dossier.subjectChoices.length} sujets demandés par ce candidat (cliquez un vœu pour l’examiner)
-                        </h3>
-                        <span className="text-xs font-mono text-blue-700 font-semibold">
-                          Vœu actif : Choix n°{selectedEntry.choice.priority}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    {/* 3 Wishes Switcher */}
+                    <div className="p-5 space-y-2.5 bg-slate-50/50">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                         {[...selectedEntry.dossier.subjectChoices]
                           .sort((a, b) => a.priority - b.priority)
                           .map((ch) => {
@@ -738,7 +798,7 @@ export const CommissionWorkspace: React.FC = () => {
                                 onClick={() =>
                                   setSelectedEntryKey(`${selectedEntry.dossier.id}::${ch.subjectId}`)
                                 }
-                                className={`text-left p-3 rounded-lg border transition-colors ${
+                                className={`text-left p-2.5 rounded-lg border transition-colors cursor-pointer ${
                                   active
                                     ? 'bg-white border-blue-600 ring-1 ring-blue-600'
                                     : 'bg-white border-slate-200 hover:border-slate-300'
@@ -746,17 +806,14 @@ export const CommissionWorkspace: React.FC = () => {
                               >
                                 <div className="flex items-center justify-between text-xs">
                                   <span className="font-mono font-bold text-slate-900">
-                                    Choix n°{ch.priority}
+                                    Choix {ch.priority}
                                   </span>
                                   <span className={`font-semibold ${st.textClass}`}>
                                     {st.shortLabel}
                                   </span>
                                 </div>
-                                <p className="text-xs font-mono text-blue-700 mt-1 truncate">
+                                <p className="text-xs font-mono text-blue-700 mt-0.5 truncate">
                                   {s?.code || ch.subjectId}
-                                </p>
-                                <p className="text-xs text-slate-600 truncate mt-0.5">
-                                  {s?.title || 'Sujet'}
                                 </p>
                               </button>
                             );
@@ -764,263 +821,375 @@ export const CommissionWorkspace: React.FC = () => {
                       </div>
 
                       {selectedEntry.subject && (
-                        <div className="pt-2 text-xs text-slate-700">
-                          <strong>Sujet examiné ({selectedEntry.subject.code}) :</strong>{' '}
-                          {selectedEntry.subject.title} ·{' '}
-                          <span className="text-slate-500">
-                            {selectedEntry.subject.supervisor} ({selectedEntry.subject.laboratoire})
-                          </span>
-                        </div>
+                        <p className="text-xs text-slate-700 pt-1">
+                          <strong className="text-slate-900">{selectedEntry.subject.title}</strong>{' '}
+                          · {selectedEntry.subject.supervisor}
+                        </p>
                       )}
                     </div>
 
-                    {/* Academic Summary */}
-                    <div className="p-6 space-y-4">
-                      <h3 className="text-sm font-bold text-slate-900">
-                        Parcours universitaire et adéquation scientifique
-                      </h3>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                        <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                    {/* Concise Academic Table & Documents */}
+                    <div className="p-5 space-y-4">
+                      <div className="grid grid-cols-3 divide-x divide-slate-200 border border-slate-200 rounded-lg text-xs">
+                        <div className="p-2.5">
                           <span className="text-slate-500 block">
-                            Baccalauréat ({selectedEntry.dossier.academicInfo.bacYear})
+                            Bac ({selectedEntry.dossier.academicInfo.bacYear})
                           </span>
-                          <strong className="text-slate-900 block mt-0.5">
-                            {selectedEntry.dossier.academicInfo.bacSeries}
+                          <strong className="font-mono text-slate-900 tabular-nums">
+                            {selectedEntry.dossier.academicInfo.bacAverage}/20
                           </strong>
-                          <span className="font-mono font-semibold text-slate-800 tabular-nums">
-                            Moyenne : {selectedEntry.dossier.academicInfo.bacAverage}/20
-                          </span>
                         </div>
-                        <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                          <span className="text-slate-500 block">
-                            Licence ({selectedEntry.dossier.academicInfo.licenceYear})
+                        <div className="p-2.5">
+                          <span className="text-slate-500 block truncate">
+                            Licence ({selectedEntry.dossier.academicInfo.licenceInstitution})
                           </span>
-                          <strong className="text-slate-900 block mt-0.5 truncate">
-                            {selectedEntry.dossier.academicInfo.licenceTitle}
+                          <strong className="font-mono text-slate-900 tabular-nums">
+                            {selectedEntry.dossier.academicInfo.licenceAverage}/20
                           </strong>
-                          <span className="font-mono font-semibold text-slate-800 tabular-nums">
-                            Moyenne : {selectedEntry.dossier.academicInfo.licenceAverage}/20
-                          </span>
                         </div>
-                        <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                          <span className="text-slate-500 block">
-                            {selectedEntry.dossier.academicInfo.masterType} (
-                            {selectedEntry.dossier.academicInfo.masterYear})
+                        <div className="p-2.5">
+                          <span className="text-slate-500 block truncate">
+                            {selectedEntry.dossier.academicInfo.masterType}
                           </span>
-                          <strong className="text-slate-900 block mt-0.5 truncate">
-                            {selectedEntry.dossier.academicInfo.masterInstitution}
+                          <strong className="font-mono text-blue-700 tabular-nums">
+                            {selectedEntry.dossier.academicInfo.masterAverage}/20
                           </strong>
-                          <span className="font-mono font-bold text-blue-700 tabular-nums">
-                            Moyenne : {selectedEntry.dossier.academicInfo.masterAverage}/20
-                          </span>
                         </div>
                       </div>
 
-                      <div className="text-xs space-y-1.5 text-slate-700">
+                      <div className="text-xs space-y-1 text-slate-700">
                         <p>
-                          <strong>Mémoire / PFE :</strong>{' '}
-                          {selectedEntry.dossier.academicInfo.pfeTitle}
+                          <strong className="text-slate-900">Diplôme :</strong>{' '}
+                          {selectedEntry.dossier.academicInfo.masterTitle} (
+                          {selectedEntry.dossier.academicInfo.masterInstitution},{' '}
+                          {selectedEntry.dossier.academicInfo.masterYear})
                         </p>
                         <p>
-                          <strong>Motivation du candidat :</strong>{' '}
+                          <strong className="text-slate-900">PFE :</strong>{' '}
+                          {selectedEntry.dossier.academicInfo.pfeTitle}
+                        </p>
+                        <p className="text-slate-600">
+                          <strong className="text-slate-900">Motivation :</strong>{' '}
                           {selectedEntry.dossier.motivation}
                         </p>
                       </div>
-                    </div>
 
-                    {/* Uploaded Documents Viewer */}
-                    <div className="p-6 space-y-3">
-                      <h3 className="text-sm font-bold text-slate-900">
-                        Pièces justificatives déposées ({selectedEntry.dossier.documents.length})
-                      </h3>
+                      {/* Documents & Demande de correction */}
                       <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
-                        {selectedEntry.dossier.documents.map((doc) => {
-                          const req = campaignConfig.documentRequirements.find(
-                            (r) => r.id === doc.requirementId
-                          );
-                          const pres = getDocStatusPresentation(doc.status);
-                          return (
-                            <div
-                              key={doc.requirementId}
-                              className="p-3 flex items-center justify-between gap-3 text-xs"
-                            >
-                              <div className="min-w-0">
-                                <p className="font-semibold text-slate-900 truncate">
-                                  {req?.label || doc.requirementId}
-                                </p>
-                                <p className="text-slate-500 font-mono truncate">
-                                  {doc.fileName} · {formatFileSize(doc.fileSizeKB)} ·{' '}
-                                  <span className={pres.textClass}>{pres.label}</span>
-                                </p>
+                        <div className="px-3 py-2 bg-slate-50/70 flex items-center justify-between text-xs">
+                          <span className="font-semibold text-slate-700">
+                            Pièces du dossier (préinscription)
+                          </span>
+                          <span className="text-slate-500">
+                            Signalez toute pièce manquante ou non conforme
+                          </span>
+                        </div>
+                        {campaignConfig.documentRequirements
+                          .filter(
+                            (r) =>
+                              r.stage === 'preinscription' ||
+                              selectedEntry.dossier.documents.some((d) => d.requirementId === r.id) ||
+                              (selectedEntry.dossier.correctionRequests || []).some(
+                                (cr) => cr.requirementId === r.id
+                              )
+                          )
+                          .map((req) => {
+                            const doc = selectedEntry.dossier.documents.find(
+                              (d) => d.requirementId === req.id
+                            );
+                            const activeCorr = getActiveCorrectionRequest(
+                              selectedEntry.dossier,
+                              req.id
+                            );
+                            const resubmittedCorr = (
+                              selectedEntry.dossier.correctionRequests || []
+                            ).find((cr) => cr.requirementId === req.id && cr.status === 'resubmitted');
+                            const effectiveStatus = doc
+                              ? doc.status
+                              : activeCorr
+                              ? 'a_corriger'
+                              : 'manquante';
+                            const pres = getDocStatusPresentation(effectiveStatus);
+                            const deadlineISO = activeCorr?.deadline || doc?.correctionDeadline;
+                            const deadlineInfo = computeDeadlineInfo(deadlineISO);
+                            const isEditingCorr = commCorrReqId === req.id;
+
+                            return (
+                              <div key={req.id} className="px-3 py-2.5 space-y-2 text-xs">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="min-w-0 space-y-0.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="font-mono font-semibold text-slate-900">
+                                        {req.code}
+                                      </span>
+                                      <span className="text-slate-400">·</span>
+                                      <span className="text-slate-700 truncate">{req.label}</span>
+                                      <span className="text-slate-400">·</span>
+                                      <span className={`font-semibold ${pres.textClass}`}>
+                                        {pres.label}
+                                      </span>
+                                      {resubmittedCorr && doc?.status === 'deposee' && (
+                                        <>
+                                          <span className="text-slate-400">·</span>
+                                          <span className="font-semibold text-blue-700">
+                                            Nouvelle version déposée
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+                                    {doc ? (
+                                      <p className="text-slate-500 font-mono truncate">
+                                        {doc.fileName} ({formatFileSize(doc.fileSizeKB)})
+                                      </p>
+                                    ) : (
+                                      <p className="text-amber-700">Aucun fichier déposé</p>
+                                    )}
+                                    {(activeCorr?.reason || doc?.reviewComment) &&
+                                      effectiveStatus === 'a_corriger' && (
+                                        <p className="text-red-700">
+                                          Motif : {activeCorr?.reason || doc?.reviewComment}
+                                          {deadlineISO && (
+                                            <span className="font-mono">
+                                              {' '}
+                                              · Échéance {formatDateFR(deadlineISO)}
+                                              {deadlineInfo
+                                                ? ` (${deadlineInfo.shortCountdown})`
+                                                : ''}
+                                            </span>
+                                          )}
+                                        </p>
+                                      )}
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    {doc && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setPreviewDoc({
+                                            doc,
+                                            label: req.label,
+                                            candidateName: `${selectedEntry.dossier.personalInfo.firstName} ${selectedEntry.dossier.personalInfo.lastName}`,
+                                          })
+                                        }
+                                        className="px-2.5 py-1 font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Eye className="w-3.5 h-3.5" />
+                                        Voir
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (isEditingCorr) {
+                                          setCommCorrReqId(null);
+                                        } else {
+                                          setCommCorrReqId(req.id);
+                                          setCommCorrReason(
+                                            activeCorr?.reason ||
+                                              doc?.reviewComment ||
+                                              (doc
+                                                ? `Votre ${req.label.toLowerCase()} est incomplet ou illisible.`
+                                                : `Pièce manquante : veuillez déposer ${req.label.toLowerCase()}.`)
+                                          );
+                                          setCommCorrDeadline(
+                                            activeCorr?.deadline ||
+                                              addDaysISO(
+                                                getTodayISO(),
+                                                campaignConfig.deadlinePolicy.defaultCorrectionDays
+                                              )
+                                          );
+                                        }
+                                      }}
+                                      className="px-2.5 py-1 font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded transition-colors cursor-pointer"
+                                    >
+                                      {doc ? 'À corriger' : 'Signaler'}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {isEditingCorr && (
+                                  <div className="p-2.5 rounded-lg bg-red-50/60 border border-red-200 space-y-2">
+                                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                                      <input
+                                        type="text"
+                                        value={commCorrReason}
+                                        onChange={(e) => setCommCorrReason(e.target.value)}
+                                        placeholder="Motif précis du refus ou de la correction..."
+                                        className="sm:col-span-8 px-2.5 py-1.5 text-xs bg-white border border-red-300 rounded-md"
+                                      />
+                                      <input
+                                        type="date"
+                                        aria-label="Date limite de régularisation"
+                                        value={commCorrDeadline}
+                                        onChange={(e) => setCommCorrDeadline(e.target.value)}
+                                        className="sm:col-span-4 px-2.5 py-1.5 text-xs font-mono bg-white border border-red-300 rounded-md"
+                                      />
+                                    </div>
+                                    <div className="flex items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setCommCorrReqId(null)}
+                                        className="px-2.5 py-1 text-xs text-slate-600 cursor-pointer"
+                                      >
+                                        Annuler
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const res = requestDocumentCorrection(
+                                            selectedEntry.dossier.id,
+                                            req.id,
+                                            commCorrReason,
+                                            commCorrDeadline
+                                          );
+                                          if (res.ok) {
+                                            setCommCorrReqId(null);
+                                            setBannerMsg(
+                                              `Demande de correction envoyée au candidat (échéance : ${formatDateFR(res.deadline)}).`
+                                            );
+                                          }
+                                        }}
+                                        className="px-3 py-1 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-md cursor-pointer"
+                                      >
+                                        Notifier le candidat
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
                               </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setPreviewDoc({
-                                    doc,
-                                    label: req?.label || 'Document',
-                                    candidateName: `${selectedEntry.dossier.personalInfo.firstName} ${selectedEntry.dossier.personalInfo.lastName}`,
-                                  })
-                                }
-                                className="px-3 py-1.5 font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors shrink-0 flex items-center gap-1.5"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                                Consulter
-                              </button>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
                       </div>
                     </div>
 
-                    {/* Step A: Décision de présélection (Retenu ?) */}
-                    <div className="p-6 space-y-3">
-                      <h3 className="text-sm font-bold text-slate-900">
-                        1. Décision de présélection pour le Choix n°{selectedEntry.choice.priority} ({selectedEntry.subject?.code})
+                    {/* 1. Présélection */}
+                    <div className="p-5 space-y-2.5">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                        1. Présélection
                       </h3>
-                      <input
-                        type="text"
-                        value={preselectionNote}
-                        onChange={(e) => setPreselectionNote(e.target.value)}
-                        placeholder="Observation scientifique ou motif éventuel de refus sur ce sujet..."
-                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg"
-                      />
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPreselectionDecision(
-                              selectedEntry.dossier.id,
-                              selectedEntry.choice.subjectId,
-                              true,
-                              preselectionNote
-                            );
-                            setBannerMsg(
-                              `Candidat retenu en présélection sur le sujet ${selectedEntry.subject?.code || ''}.`
-                            );
-                          }}
-                          className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors flex items-center gap-1.5"
-                        >
-                          <UserCheck className="w-3.5 h-3.5" />
-                          Retenir pour ce sujet
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPreselectionDecision(
-                              selectedEntry.dossier.id,
-                              selectedEntry.choice.subjectId,
-                              false,
-                              preselectionNote ||
-                                'Prérequis pédagogiques insuffisants pour ce sujet.'
-                            );
-                            setBannerMsg(
-                              `Vœu n°${selectedEntry.choice.priority} (${selectedEntry.subject?.code || ''}) marqué non retenu.`
-                            );
-                          }}
-                          className="px-3.5 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors flex items-center gap-1.5"
-                        >
-                          <XCircle className="w-3.5 h-3.5" />
-                          Refuser ce vœu
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Step B: Organiser l'entretien */}
-                    <form onSubmit={handleSaveInterview} className="p-6 space-y-3">
-                      <h3 className="text-sm font-bold text-slate-900">
-                        2. Organiser et notifier l’entretien oral ({selectedEntry.subject?.code})
-                      </h3>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">
-                            Date
-                          </label>
-                          <input
-                            type="date"
-                            value={intDate}
-                            onChange={(e) => setIntDate(e.target.value)}
-                            className="w-full px-3 py-1.5 text-xs font-mono border border-slate-200 rounded-lg"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">
-                            Horaire
-                          </label>
-                          <input
-                            type="time"
-                            value={intTime}
-                            onChange={(e) => setIntTime(e.target.value)}
-                            className="w-full px-3 py-1.5 text-xs font-mono border border-slate-200 rounded-lg"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">
-                            Modalité
-                          </label>
-                          <select
-                            value={intModality}
-                            onChange={(e) =>
-                              setIntModality(e.target.value as 'presentiel' | 'distanciel')
-                            }
-                            className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={preselectionNote}
+                          onChange={(e) => setPreselectionNote(e.target.value)}
+                          placeholder="Observation ou motif (optionnel)..."
+                          className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
+                        />
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPreselectionDecision(
+                                selectedEntry.dossier.id,
+                                selectedEntry.choice.subjectId,
+                                true,
+                                preselectionNote
+                              );
+                              setBannerMsg('Candidat présélectionné.');
+                            }}
+                            className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors inline-flex items-center gap-1.5 cursor-pointer"
                           >
-                            <option value="presentiel">Présentiel</option>
-                            <option value="distanciel">Visioconférence</option>
-                          </select>
+                            <UserCheck className="w-3.5 h-3.5" />
+                            Retenir
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPreselectionDecision(
+                                selectedEntry.dossier.id,
+                                selectedEntry.choice.subjectId,
+                                false,
+                                preselectionNote || 'Prérequis insuffisants.'
+                              );
+                              setBannerMsg('Vœu refusé.');
+                            }}
+                            className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                            Refuser
+                          </button>
                         </div>
                       </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">
-                            Salle ou lien de connexion
-                          </label>
-                          <input
-                            type="text"
-                            value={intLocation}
-                            onChange={(e) => setIntLocation(e.target.value)}
-                            className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">
-                            Membres du jury
-                          </label>
-                          <input
-                            type="text"
-                            value={intJury}
-                            onChange={(e) => setIntJury(e.target.value)}
-                            className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
-                          />
-                        </div>
+                    </div>
+
+                    {/* 2. Entretien */}
+                    <form onSubmit={handleSaveInterview} className="p-5 space-y-2.5">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                        2. Convocation à l’entretien
+                      </h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <input
+                          type="date"
+                          aria-label="Date d'entretien"
+                          value={intDate}
+                          onChange={(e) => setIntDate(e.target.value)}
+                          className="px-3 py-1.5 text-xs font-mono border border-slate-200 rounded-lg"
+                        />
+                        <input
+                          type="time"
+                          aria-label="Heure d'entretien"
+                          value={intTime}
+                          onChange={(e) => setIntTime(e.target.value)}
+                          className="px-3 py-1.5 text-xs font-mono border border-slate-200 rounded-lg"
+                        />
+                        <select
+                          aria-label="Modalité"
+                          value={intModality}
+                          onChange={(e) =>
+                            setIntModality(e.target.value as 'presentiel' | 'distanciel')
+                          }
+                          className="px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                        >
+                          <option value="presentiel">Présentiel</option>
+                          <option value="distanciel">Visioconférence</option>
+                        </select>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <input
+                          type="text"
+                          value={intLocation}
+                          onChange={(e) => setIntLocation(e.target.value)}
+                          placeholder="Salle ou lien..."
+                          className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={intJury}
+                          onChange={(e) => setIntJury(e.target.value)}
+                          placeholder="Membres du jury..."
+                          className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
+                        />
                       </div>
                       <button
                         type="submit"
-                        className="px-4 py-2 text-xs font-semibold text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1.5"
+                        className="px-3.5 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors inline-flex items-center gap-1.5 cursor-pointer"
                       >
                         <Calendar className="w-3.5 h-3.5 text-blue-700" />
-                        Enregistrer & envoyer la convocation au candidat
+                        {selectedEntry.choice.interview
+                          ? 'Modifier l’entretien'
+                          : 'Convoquer le candidat'}
                       </button>
                     </form>
 
-                    {/* Step C: Évaluer & Affecter Résultat */}
-                    <div className="p-6 space-y-4">
-                      <form onSubmit={handleSaveEvaluation} className="space-y-3">
+                    {/* 3. Notes & Décision finale */}
+                    <div className="p-5 space-y-4">
+                      <form onSubmit={handleSaveEvaluation} className="space-y-2.5">
                         <div className="flex items-center justify-between">
-                          <h3 className="text-sm font-bold text-slate-900">
-                            3. Évaluation chiffrée et décision de classement ({selectedEntry.subject?.code})
+                          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                            3. Notes & Décision
                           </h3>
                           {liveWeightedPreview && (
                             <span className="text-xs font-mono font-bold text-blue-700 tabular-nums">
-                              Moyenne calculée : {liveWeightedPreview}/20
+                              Moyenne : {liveWeightedPreview}/20
                             </span>
                           )}
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                           <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1">
-                              Note Dossier (/20 · coeff. {campaignConfig.dossierWeight}%)
+                            <label className="block text-xs text-slate-600 mb-1">
+                              Note dossier (/20 · {campaignConfig.dossierWeight}%)
                             </label>
                             <input
                               type="number"
@@ -1033,8 +1202,8 @@ export const CommissionWorkspace: React.FC = () => {
                             />
                           </div>
                           <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1">
-                              Note Entretien (/20 · coeff. {campaignConfig.interviewWeight}%)
+                            <label className="block text-xs text-slate-600 mb-1">
+                              Note entretien (/20 · {campaignConfig.interviewWeight}%)
                             </label>
                             <input
                               type="number"
@@ -1051,110 +1220,100 @@ export const CommissionWorkspace: React.FC = () => {
                         {Number.parseFloat(oralScore) <
                           campaignConfig.eliminatoryInterviewScore && (
                           <p className="text-xs text-red-700 font-medium">
-                            ⚠ Attention : note d’entretien inférieure au seuil éliminatoire configuré (
+                            Note inférieure au seuil éliminatoire (
                             {campaignConfig.eliminatoryInterviewScore}/20).
                           </p>
                         )}
 
-                        <input
-                          type="text"
-                          value={evalObs}
-                          onChange={(e) => setEvalObs(e.target.value)}
-                          placeholder="Appréciation globale de la commission d’audition pour ce sujet..."
-                          className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
-                        />
-
-                        <button
-                          type="submit"
-                          className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors"
-                        >
-                          Enregistrer les notes d’évaluation
-                        </button>
-                      </form>
-
-                      <div className="pt-4 border-t border-slate-100 space-y-3">
-                        <p className="text-xs font-semibold text-slate-700">
-                          Attribuer la décision finale sur le sujet {selectedEntry.subject?.code} :
-                        </p>
-                        <div className="flex flex-wrap items-center gap-2.5">
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="text"
+                            value={evalObs}
+                            onChange={(e) => setEvalObs(e.target.value)}
+                            placeholder="Appréciation du jury..."
+                            className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
+                          />
                           <button
-                            type="button"
-                            onClick={() => {
-                              setCommissionFinalDecision(
-                                selectedEntry.dossier.id,
-                                selectedEntry.choice.subjectId,
-                                'admis'
-                              );
-                              setBannerMsg(
-                                `Candidat admis en liste principale sur le sujet ${selectedEntry.subject?.code || ''}.`
-                              );
-                            }}
-                            className="px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors"
+                            type="submit"
+                            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                           >
-                            Admettre en liste principale
-                          </button>
-
-                          <div className="inline-flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min="1"
-                              max="20"
-                              value={waitlistRankInput}
-                              onChange={(e) => setWaitlistRankInput(e.target.value)}
-                              aria-label="Rang sur liste d'attente"
-                              className="w-14 px-2 py-1.5 text-xs font-mono border border-slate-200 rounded-lg"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const rank = Math.max(
-                                  1,
-                                  Number.parseInt(waitlistRankInput, 10) || 1
-                                );
-                                setCommissionFinalDecision(
-                                  selectedEntry.dossier.id,
-                                  selectedEntry.choice.subjectId,
-                                  'liste_attente',
-                                  { waitlistRank: rank }
-                                );
-                                setBannerMsg(
-                                  `Candidat inscrit sur liste d’attente (Rang ${rank}) pour ${selectedEntry.subject?.code || ''}.`
-                                );
-                              }}
-                              className="px-3 py-2 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors whitespace-nowrap"
-                            >
-                              Placer en liste d’attente
-                            </button>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setCommissionFinalDecision(
-                                selectedEntry.dossier.id,
-                                selectedEntry.choice.subjectId,
-                                'non_retenu',
-                                {
-                                  rejectionReason:
-                                    rejectionReasonInput ||
-                                    'Classement au-delà de la capacité d’encadrement ouverte sur le sujet.',
-                                }
-                              );
-                              setBannerMsg(
-                                `Vœu marqué non retenu sur ${selectedEntry.subject?.code || ''}.`
-                              );
-                            }}
-                            className="px-3 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors"
-                          >
-                            Non admis
+                            Enregistrer les notes
                           </button>
                         </div>
+                      </form>
+
+                      <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCommissionFinalDecision(
+                              selectedEntry.dossier.id,
+                              selectedEntry.choice.subjectId,
+                              'admis'
+                            );
+                            setBannerMsg('Candidat admis en liste principale.');
+                          }}
+                          className="px-3.5 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer"
+                        >
+                          Admettre
+                        </button>
+
+                        <div className="inline-flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="1"
+                            max="20"
+                            value={waitlistRankInput}
+                            onChange={(e) => setWaitlistRankInput(e.target.value)}
+                            aria-label="Rang liste d'attente"
+                            className="w-14 px-2 py-1.5 text-xs font-mono border border-slate-200 rounded-lg"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rank = Math.max(
+                                1,
+                                Number.parseInt(waitlistRankInput, 10) || 1
+                              );
+                              setCommissionFinalDecision(
+                                selectedEntry.dossier.id,
+                                selectedEntry.choice.subjectId,
+                                'liste_attente',
+                                { waitlistRank: rank }
+                              );
+                              setBannerMsg(`Classé en liste d’attente (rang ${rank}).`);
+                            }}
+                            className="px-3 py-1.5 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            Liste d’attente
+                          </button>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCommissionFinalDecision(
+                              selectedEntry.dossier.id,
+                              selectedEntry.choice.subjectId,
+                              'non_retenu',
+                              {
+                                rejectionReason:
+                                  rejectionReasonInput ||
+                                  'Classement au-delà des places ouvertes.',
+                              }
+                            );
+                            setBannerMsg('Candidature non retenue sur ce sujet.');
+                          }}
+                          className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors cursor-pointer"
+                        >
+                          Non retenu
+                        </button>
                       </div>
                     </div>
                   </div>
                 ) : (
                   <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-sm text-slate-500">
-                    Sélectionnez une candidature dans la colonne de gauche pour l’examiner.
+                    Sélectionnez une candidature.
                   </div>
                 )}
               </div>
@@ -1162,152 +1321,140 @@ export const CommissionWorkspace: React.FC = () => {
           </div>
         )}
 
-        {/* TAB 2: PLANNING DES ENTRETIENS */}
+        {/* TAB: ENTRETIENS */}
         {activeTab === 'entretiens' && (
-          <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-            <div className="p-6">
-              <h2 className="text-lg font-bold text-slate-900">
-                Calendrier récapitulatif des entretiens programmés
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Liste des convocations par candidat, sujet et rang de vœu avec horaires, salles et membres du jury.
-              </p>
-            </div>
+          <div className="space-y-4">
+            <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+              Planning des entretiens ({scheduledInterviews.length})
+            </h1>
 
-            {scheduledInterviews.length === 0 ? (
-              <div className="p-8 text-center text-sm text-slate-500">
-                Aucun entretien programmé pour le moment.
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold">
-                      <th className="py-3 px-4">Date & Heure</th>
-                      <th className="py-3 px-4">Candidat</th>
-                      <th className="py-3 px-4">Sujet & Ordre du vœu</th>
-                      <th className="py-3 px-4">Lieu / Modalité</th>
-                      <th className="py-3 px-4">Statut du vœu</th>
-                      <th className="py-3 px-4 text-right">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {scheduledInterviews.map((entry) => {
-                      const { dossier: d, choice, subject: suj } = entry;
-                      const st = getStatusPresentation(choice.status);
-                      return (
-                        <tr key={entry.key} className="hover:bg-slate-50">
-                          <td className="py-3 px-4 font-mono font-medium text-slate-900 whitespace-nowrap tabular-nums">
-                            {choice.interview?.date} · {choice.interview?.time}
-                          </td>
-                          <td className="py-3 px-4 font-semibold text-slate-900">
-                            {d.personalInfo.firstName} {d.personalInfo.lastName}
-                            <span className="block font-mono font-normal text-slate-500">
-                              {d.dossierNumber}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 font-mono">
-                            <span className="font-semibold text-blue-700">
-                              {suj?.code || choice.subjectId}
-                            </span>{' '}
-                            <span className="text-slate-500">· Choix n°{choice.priority}</span>
-                          </td>
-                          <td className="py-3 px-4 text-slate-600 max-w-xs truncate">
-                            {choice.interview?.location}
-                          </td>
-                          <td className={`py-3 px-4 font-semibold ${st.textClass}`}>
-                            {st.shortLabel}
-                          </td>
-                          <td className="py-3 px-4 text-right whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedEntryKey(entry.key);
-                                setActiveTab('candidatures');
-                              }}
-                              className="font-semibold text-blue-700 hover:underline"
-                            >
-                              Ouvrir candidature
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              {scheduledInterviews.length === 0 ? (
+                <div className="p-8 text-center text-sm text-slate-500">
+                  Aucun entretien programmé.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold">
+                        <th className="py-3 px-4">Date & Heure</th>
+                        <th className="py-3 px-4">Candidat</th>
+                        <th className="py-3 px-4">Sujet</th>
+                        <th className="py-3 px-4">Lieu / Modalité</th>
+                        <th className="py-3 px-4">Statut</th>
+                        <th className="py-3 px-4 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {scheduledInterviews.map((entry) => {
+                        const { dossier: d, choice, subject: suj } = entry;
+                        const st = getStatusPresentation(choice.status);
+                        return (
+                          <tr key={entry.key} className="hover:bg-slate-50">
+                            <td className="py-3 px-4 font-mono font-medium text-slate-900 whitespace-nowrap tabular-nums">
+                              {choice.interview?.date} · {choice.interview?.time}
+                            </td>
+                            <td className="py-3 px-4 font-semibold text-slate-900">
+                              {d.personalInfo.firstName} {d.personalInfo.lastName}
+                              <span className="block font-mono font-normal text-slate-500">
+                                {d.dossierNumber}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 font-mono whitespace-nowrap">
+                              <span className="font-semibold text-blue-700">
+                                {suj?.code || choice.subjectId}
+                              </span>{' '}
+                              <span className="text-slate-500">· Choix {choice.priority}</span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-600 max-w-xs truncate">
+                              {choice.interview?.location}
+                            </td>
+                            <td className={`py-3 px-4 font-semibold ${st.textClass}`}>
+                              {st.shortLabel}
+                            </td>
+                            <td className="py-3 px-4 text-right whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedEntryKey(entry.key);
+                                  setActiveTab('candidatures');
+                                }}
+                                className="font-semibold text-blue-700 hover:underline cursor-pointer"
+                              >
+                                Ouvrir
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* TAB 3: ÉVALUATION, CLASSEMENT & GESTION LISTE D'ATTENTE */}
+        {/* TAB: CLASSEMENT */}
         {activeTab === 'classement' && (
-          <div className="space-y-6">
-            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900">
-                    Classement par sujet, Liste Principale et Liste d’Attente
-                  </h2>
-                  <p className="text-xs text-slate-600 mt-0.5">
-                    Les candidats ayant choisi ce sujet (en Choix 1, 2 ou 3) sont classés par moyenne pondérée décroissante ({campaignConfig.dossierWeight}% dossier + {campaignConfig.interviewWeight}% entretien).
-                  </p>
-                </div>
+          <div className="space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-900">Classement par sujet</h1>
 
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <select
-                    value={rankingSubject?.id || ''}
-                    onChange={(e) => setRankingSubjectId(e.target.value)}
-                    className="px-3.5 py-2 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg"
-                  >
-                    {subjects.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.code} ({s.places} place{s.places > 1 ? 's' : ''}) —{' '}
-                        {s.title.slice(0, 42)}...
-                      </option>
-                    ))}
-                  </select>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={rankingSubject?.id || ''}
+                  onChange={(e) => setRankingSubjectId(e.target.value)}
+                  className="px-3 py-2 text-xs font-semibold bg-white border border-slate-200 rounded-lg"
+                >
+                  {subjects.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.code} ({s.places} place{s.places > 1 ? 's' : ''}) —{' '}
+                      {s.title.slice(0, 40)}...
+                    </option>
+                  ))}
+                </select>
 
-                  {rankingSubject && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handleExportSubjectCandidatesCsv(rankingSubject)}
-                        className="px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap flex items-center gap-1.5"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        Exporter PV (CSV)
-                      </button>
+                {rankingSubject && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => handleExportSubjectCandidatesCsv(rankingSubject)}
+                      className="px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      CSV
+                    </button>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const res = callNextOnWaitlist(rankingSubject.id);
-                          if (!res.ok) {
-                            setBannerMsg(res.error || 'Aucun candidat sur liste d’attente.');
-                          } else {
-                            setBannerMsg(
-                              `Appel effectué : ${res.promotedName} passe de la liste d’attente à la liste principale sur ${rankingSubject.code} et reçoit une notification immédiate.`
-                            );
-                          }
-                        }}
-                        className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap flex items-center gap-1.5"
-                      >
-                        <Users className="w-3.5 h-3.5" />
-                        Appeler le 1er de la liste d’attente
-                      </button>
-                    </>
-                  )}
-                </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const res = callNextOnWaitlist(rankingSubject.id);
+                        if (!res.ok) {
+                          setBannerMsg(res.error || 'Aucun candidat sur liste d’attente.');
+                        } else {
+                          setBannerMsg(
+                            `${res.promotedName} promu(e) en liste principale sur ${rankingSubject.code}.`
+                          );
+                        }
+                      }}
+                      className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Users className="w-3.5 h-3.5" />
+                      Appeler suivant (Attente)
+                    </button>
+                  </>
+                )}
               </div>
+            </div>
 
-              {rankingSubject && (
-                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700 flex flex-wrap items-center justify-between gap-2">
-                  <span>
-                    <strong>{rankingSubject.code} :</strong> {rankingSubject.title}
-                  </span>
-                  <span className="font-mono font-semibold text-slate-900 tabular-nums">
-                    Quota ouvert : {rankingSubject.places} place(s) · Admis sur ce sujet :{' '}
+            {rankingSubject && (
+              <div className="px-4 py-3 rounded-xl bg-white border border-slate-200 text-xs text-slate-700 flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium text-slate-900">{rankingSubject.title}</span>
+                <span className="font-mono tabular-nums text-slate-600">
+                  Places : <strong className="text-slate-900">{rankingSubject.places}</strong> · Admis :{' '}
+                  <strong className="text-emerald-700">
                     {
                       rankingEntries.filter(
                         (e) =>
@@ -1316,172 +1463,294 @@ export const CommissionWorkspace: React.FC = () => {
                             e.dossier.confirmedSubjectId === rankingSubject.id)
                       ).length
                     }
-                  </span>
-                </div>
-              )}
-
-              <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold">
-                      <th className="py-3 px-4">Rang</th>
-                      <th className="py-3 px-4">Candidat</th>
-                      <th className="py-3 px-4">Vœu</th>
-                      <th className="py-3 px-4 text-right">Dossier /20</th>
-                      <th className="py-3 px-4 text-right">Entretien /20</th>
-                      <th className="py-3 px-4 text-right">Note Finale /20</th>
-                      <th className="py-3 px-4">Décision sur ce sujet</th>
-                      <th className="py-3 px-4 text-right">Actions rapides</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {rankingEntries.length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="py-8 text-center text-slate-500">
-                          Aucune candidature soumise sur ce sujet de thèse.
-                        </td>
-                      </tr>
-                    ) : (
-                      rankingEntries.map((entry, index) => {
-                        const { dossier: cand, choice } = entry;
-                        const st = getStatusPresentation(choice.status);
-                        return (
-                          <tr key={entry.key} className="hover:bg-slate-50">
-                            <td className="py-3 px-4 font-mono font-bold text-slate-700 tabular-nums">
-                              #{index + 1}
-                            </td>
-                            <td className="py-3 px-4">
-                              <p className="font-semibold text-slate-900">
-                                {cand.personalInfo.firstName} {cand.personalInfo.lastName}
-                              </p>
-                              <p className="text-slate-500 font-mono">{cand.dossierNumber}</p>
-                            </td>
-                            <td className="py-3 px-4 font-mono font-semibold text-slate-700 whitespace-nowrap">
-                              Choix n°{choice.priority}
-                            </td>
-                            <td className="py-3 px-4 text-right font-mono tabular-nums">
-                              {choice.evaluation
-                                ? choice.evaluation.academicScore.toFixed(2)
-                                : '—'}
-                            </td>
-                            <td className="py-3 px-4 text-right font-mono tabular-nums">
-                              {choice.evaluation
-                                ? choice.evaluation.interviewScore.toFixed(2)
-                                : '—'}
-                            </td>
-                            <td className="py-3 px-4 text-right font-mono font-bold text-slate-900 tabular-nums">
-                              {choice.evaluation
-                                ? choice.evaluation.weightedScore.toFixed(2)
-                                : 'Non noté'}
-                            </td>
-                            <td className={`py-3 px-4 font-semibold ${st.textClass}`}>
-                              {choice.status === 'liste_attente'
-                                ? `Liste d’attente (Rang ${choice.waitlistRank || 1})`
-                                : st.label}
-                            </td>
-                            <td className="py-3 px-4 text-right whitespace-nowrap">
-                              <div className="inline-flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setCommissionFinalDecision(
-                                      cand.id,
-                                      choice.subjectId,
-                                      'admis'
-                                    )
-                                  }
-                                  className="px-2.5 py-1 text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded font-semibold"
-                                >
-                                  Admettre
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setCommissionFinalDecision(
-                                      cand.id,
-                                      choice.subjectId,
-                                      'liste_attente',
-                                      { waitlistRank: index + 1 }
-                                    )
-                                  }
-                                  className="px-2.5 py-1 text-amber-800 bg-amber-50 hover:bg-amber-100 rounded font-semibold"
-                                >
-                                  Attente
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setSelectedEntryKey(entry.key);
-                                    setActiveTab('candidatures');
-                                  }}
-                                  className="px-2.5 py-1 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded font-semibold"
-                                >
-                                  Noter
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
+                  </strong>
+                </span>
               </div>
+            )}
+
+            <div className="bg-white overflow-x-auto border border-slate-200 rounded-xl">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold">
+                    <th className="py-3 px-4">Rang</th>
+                    <th className="py-3 px-4">Candidat</th>
+                    <th className="py-3 px-4">Choix</th>
+                    <th className="py-3 px-4 text-right">Dossier</th>
+                    <th className="py-3 px-4 text-right">Entretien</th>
+                    <th className="py-3 px-4 text-right">Moyenne</th>
+                    <th className="py-3 px-4">Statut</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {rankingEntries.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-slate-500">
+                        Aucune candidature sur ce sujet.
+                      </td>
+                    </tr>
+                  ) : (
+                    rankingEntries.map((entry, index) => {
+                      const { dossier: cand, choice } = entry;
+                      const st = getStatusPresentation(choice.status);
+                      return (
+                        <tr key={entry.key} className="hover:bg-slate-50">
+                          <td className="py-3 px-4 font-mono font-bold text-slate-700 tabular-nums">
+                            #{index + 1}
+                          </td>
+                          <td className="py-3 px-4">
+                            <p className="font-semibold text-slate-900">
+                              {cand.personalInfo.firstName} {cand.personalInfo.lastName}
+                            </p>
+                            <p className="text-slate-500 font-mono">{cand.dossierNumber}</p>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">
+                            Choix {choice.priority}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono tabular-nums">
+                            {choice.evaluation ? choice.evaluation.academicScore.toFixed(2) : '—'}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono tabular-nums">
+                            {choice.evaluation ? choice.evaluation.interviewScore.toFixed(2) : '—'}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-slate-900 tabular-nums">
+                            {choice.evaluation ? choice.evaluation.weightedScore.toFixed(2) : '—'}
+                          </td>
+                          <td className={`py-3 px-4 font-semibold ${st.textClass}`}>
+                            {choice.status === 'liste_attente'
+                              ? `Attente #${choice.waitlistRank || 1}`
+                              : st.shortLabel}
+                          </td>
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setCommissionFinalDecision(cand.id, choice.subjectId, 'admis')
+                                }
+                                className="px-2.5 py-1 text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded font-semibold cursor-pointer"
+                              >
+                                Admettre
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setCommissionFinalDecision(
+                                    cand.id,
+                                    choice.subjectId,
+                                    'liste_attente',
+                                    { waitlistRank: index + 1 }
+                                  )
+                                }
+                                className="px-2.5 py-1 text-amber-800 bg-amber-50 hover:bg-amber-100 rounded font-semibold cursor-pointer"
+                              >
+                                Attente
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedEntryKey(entry.key);
+                                  setActiveTab('candidatures');
+                                }}
+                                className="px-2.5 py-1 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded font-semibold cursor-pointer"
+                              >
+                                Noter
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
 
-        {/* TAB 4: GUIDE & SUPPORT */}
+        {/* TAB: NOTIFICATIONS */}
+        {activeTab === 'notifications' && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h1 className="text-lg sm:text-xl font-bold text-slate-900">Notifications</h1>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Candidatures à examiner, documents corrigés déposés et entretiens programmés.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="inline-flex p-1 bg-white border border-slate-200 rounded-lg text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setNotifFilter('all')}
+                    className={`px-2.5 py-1 font-semibold rounded-md cursor-pointer ${
+                      notifFilter === 'all'
+                        ? 'bg-slate-900 text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Toutes ({notifications.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNotifFilter('unread')}
+                    className={`px-2.5 py-1 font-semibold rounded-md cursor-pointer ${
+                      notifFilter === 'unread'
+                        ? 'bg-slate-900 text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Non lues ({unreadNotifCount})
+                  </button>
+                </div>
+
+                {unreadNotifCount > 0 && currentUser && (
+                  <button
+                    type="button"
+                    onClick={() => markAllNotificationsRead(currentUser.id)}
+                    className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg cursor-pointer"
+                  >
+                    Tout marquer comme lu
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
+              {filteredNotifications.length === 0 ? (
+                <div className="p-8 text-center text-sm text-slate-500">
+                  Aucune notification à afficher.
+                </div>
+              ) : (
+                filteredNotifications.map((n) => {
+                  const dlInfo = computeDeadlineInfo(n.deadline);
+                  return (
+                    <div
+                      key={n.id}
+                      className={`p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                        !n.read ? 'bg-blue-50/30' : ''
+                      }`}
+                    >
+                      <div className="space-y-1 min-w-0 max-w-2xl">
+                        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                          <span
+                            className={
+                              !n.read
+                                ? 'font-semibold text-blue-700'
+                                : 'font-medium text-slate-400'
+                            }
+                          >
+                            {!n.read ? 'Non lu' : 'Lu'}
+                          </span>
+                          <span className="text-slate-300">·</span>
+                          <span className="font-mono text-slate-500">
+                            {formatDateFR(n.createdAt, true)}
+                          </span>
+                          {n.urgent && (
+                            <>
+                              <span className="text-slate-300">·</span>
+                              <span className="font-semibold text-red-700 inline-flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                Prioritaire
+                              </span>
+                            </>
+                          )}
+                          {n.deadline && (
+                            <>
+                              <span className="text-slate-300">·</span>
+                              <span
+                                className={`font-mono font-medium ${
+                                  dlInfo?.textClass || 'text-slate-600'
+                                }`}
+                              >
+                                Échéance {formatDateFR(n.deadline)}
+                                {dlInfo ? ` (${dlInfo.shortCountdown})` : ''}
+                              </span>
+                            </>
+                          )}
+                        </div>
+
+                        <h2 className="text-sm font-semibold text-slate-900">{n.title}</h2>
+                        <p className="text-xs sm:text-sm text-slate-600">{n.message}</p>
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0">
+                        {!n.read && (
+                          <button
+                            type="button"
+                            onClick={() => markNotificationRead(n.id)}
+                            className="text-xs font-medium text-slate-500 hover:text-slate-800 underline cursor-pointer"
+                          >
+                            Marquer comme lu
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => openNotificationTarget(n)}
+                          className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors cursor-pointer"
+                        >
+                          {n.actionLabel || 'Voir'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB: AIDE */}
         {activeTab === 'aide' && <HelpCenter compactHeader />}
       </div>
 
-      {/* Document Inspection Modal */}
+      {/* Document Preview Modal */}
       {previewDoc && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setPreviewDoc(null)}
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
         >
-          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-lg overflow-hidden">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white border border-slate-200 rounded-xl w-full max-w-md overflow-hidden"
+          >
+            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">{previewDoc.label}</h3>
-                <p className="text-xs text-slate-500">Candidat : {previewDoc.candidateName}</p>
+                <p className="text-xs text-slate-500">{previewDoc.candidateName}</p>
               </div>
               <button
                 type="button"
                 onClick={() => setPreviewDoc(null)}
-                className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg"
+                className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="p-6 space-y-4">
-              <div className="p-6 rounded-lg bg-slate-50 border border-slate-200 text-center space-y-2">
-                <FileText className="w-10 h-10 text-blue-700 mx-auto" />
-                <p className="text-sm font-mono font-semibold text-slate-900">
+            <div className="p-5 space-y-4">
+              <div className="p-5 rounded-lg bg-slate-50 border border-slate-200 text-center space-y-1.5">
+                <FileText className="w-8 h-8 text-blue-700 mx-auto" />
+                <p className="text-xs font-mono font-semibold text-slate-900">
                   {previewDoc.doc.fileName}
                 </p>
                 <p className="text-xs text-slate-500 font-mono">
-                  Taille : {formatFileSize(previewDoc.doc.fileSizeKB)} · Déposé le{' '}
+                  {formatFileSize(previewDoc.doc.fileSizeKB)} ·{' '}
                   {formatDateFR(previewDoc.doc.uploadedAt, true)}
-                </p>
-                <p className="text-xs text-slate-600 pt-2">
-                  Aperçu numérique certifié du document déposé sur le serveur sécurisé GCD USMBA.
                 </p>
               </div>
               {previewDoc.doc.reviewComment && (
-                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-900">
-                  <strong>Note administrative :</strong> {previewDoc.doc.reviewComment}
-                </div>
+                <p className="text-xs text-red-700">{previewDoc.doc.reviewComment}</p>
               )}
               <div className="flex justify-end">
                 <button
                   type="button"
                   onClick={() => setPreviewDoc(null)}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg"
+                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg cursor-pointer"
                 >
-                  Fermer l’aperçu
+                  Fermer
                 </button>
               </div>
             </div>

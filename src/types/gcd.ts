@@ -38,6 +38,23 @@ export interface UploadedDocument {
   reviewComment?: string;
   reviewedBy?: string;
   reviewedAt?: string;
+  correctionDeadline?: string; // YYYY-MM-DD
+}
+
+export interface DocumentCorrectionRequest {
+  id: string;
+  requirementId: string;
+  documentCode: string;
+  documentLabel: string;
+  reason: string;
+  deadline: string; // YYYY-MM-DD
+  requestedBy: string;
+  requestedByRole: 'commission' | 'admin';
+  requestedAt: string;
+  status: 'pending' | 'resubmitted' | 'resolved';
+  resubmittedAt?: string;
+  extendedAt?: string;
+  previousDeadline?: string;
 }
 
 export interface PersonalInfo {
@@ -126,6 +143,7 @@ export interface CandidateDossier {
   motivation: string;
   researchProposalSummary: string;
   documents: UploadedDocument[];
+  correctionRequests?: DocumentCorrectionRequest[];
   status: ApplicationStatus;
   draftSavedAt: string;
   submittedAt?: string;
@@ -171,17 +189,50 @@ export interface UserAccount {
   title?: string;
   active: boolean;
   demoHighlight?: string;
+  emailNotificationsOptIn?: boolean;
 }
+
+export type NotificationCategory =
+  | 'resultat'
+  | 'entretien'
+  | 'correction'
+  | 'rappel'
+  | 'calendrier'
+  | 'annonce'
+  | 'dossier'
+  | 'info';
+
+export type NotificationActionLabel = 'Voir' | 'Corriger' | 'Consulter le résultat';
 
 export interface NotificationItem {
   id: string;
   recipientAccountId: string;
+  recipientRole?: UserRole;
   title: string;
   message: string;
   createdAt: string;
   read: boolean;
-  category: 'resultat' | 'entretien' | 'correction' | 'info';
-  actionTab?: 'suivi' | 'dossier' | 'pieces' | 'sujets';
+  readAt?: string;
+  category: NotificationCategory;
+  urgent?: boolean;
+  actionRequired?: boolean;
+  deadline?: string; // YYYY-MM-DD
+  actionTab?: string;
+  actionLabel?: NotificationActionLabel;
+  targetDossierId?: string;
+  targetSubjectId?: string;
+  targetRequirementId?: string;
+  dedupeKey?: string;
+  emailChannelStatus?: 'not_requested' | 'sent' | 'skipped_unconfigured' | 'failed';
+}
+
+export interface DeadlinePolicyConfig {
+  /** Nombre de jours accordé par défaut lors d'une demande de correction (ex: 7) */
+  defaultCorrectionDays: number;
+  /** Seuils de rappels automatiques en jours avant expiration (ex: [7, 3, 1]) */
+  reminderDaysBefore: number[];
+  /** Règle administrative explicite : rejeter automatiquement un candidat en cas de délai expiré (par défaut: false) */
+  autoRejectOnExpiredCorrection: boolean;
 }
 
 export interface CampaignConfig {
@@ -200,6 +251,46 @@ export interface CampaignConfig {
   minMasterAverage: number; // ex: 12
   eliminatoryInterviewScore: number; // ex: 10
   documentRequirements: DocumentRequirement[];
+  deadlinePolicy: DeadlinePolicyConfig;
+}
+
+export interface PublicAnnouncement {
+  id: string;
+  title: string;
+  message: string;
+  publishedAt: string;
+  publishedBy: string;
+  important: boolean;
+  active: boolean;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  actorName: string;
+  actorRole: UserRole | 'systeme';
+  eventType:
+    | 'statut_candidature'
+    | 'document_correction'
+    | 'document_resoumis'
+    | 'document_valide'
+    | 'prolongation_delai'
+    | 'rappel_echeance'
+    | 'entretien'
+    | 'resultat'
+    | 'calendrier'
+    | 'inscription'
+    | 'notification_admin'
+    | 'annonce';
+  summary: string;
+  dossierNumber?: string;
+  targetAccountId?: string;
+}
+
+export interface EmailServiceStatus {
+  configured: boolean;
+  host: string | null;
+  fromAddress: string | null;
 }
 
 export interface SupportTicket {
@@ -228,4 +319,15 @@ export interface FaqEntry {
   category: 'Compte & Accès' | 'Choix des 3 sujets' | 'Pièces justificatives' | 'Sélection & Inscription';
   question: string;
   answer: string;
+}
+
+export interface SharedPlatformState {
+  accounts: UserAccount[];
+  subjects: ThesisSubject[];
+  dossiers: CandidateDossier[];
+  notifications: NotificationItem[];
+  campaignConfig: CampaignConfig;
+  supportTickets: SupportTicket[];
+  announcements: PublicAnnouncement[];
+  auditLogs: AuditLogEntry[];
 }

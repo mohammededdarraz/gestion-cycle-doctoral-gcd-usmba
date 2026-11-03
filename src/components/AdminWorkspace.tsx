@@ -1,14 +1,21 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BarChart3,
+  Bell,
   BookOpen,
+  CalendarClock,
   Check,
   CheckCircle2,
+  Clock,
   Edit3,
   FileCheck2,
+  Mail,
+  Megaphone,
   MessageSquare,
   Plus,
+  RefreshCw,
+  Search,
   Send,
   Settings,
   ShieldCheck,
@@ -16,39 +23,79 @@ import {
   Users,
 } from 'lucide-react';
 import { useGCD } from '../context/GCDContext';
-import { DocumentStage, ThesisSubject, UserRole } from '../types/gcd';
 import {
+  ApplicationStatus,
+  CandidateDossier,
+  DocumentStage,
+  NotificationActionLabel,
+  ThesisSubject,
+  UserRole,
+} from '../types/gcd';
+import {
+  addDaysISO,
+  computeDeadlineInfo,
   formatDateFR,
   formatFileSize,
+  getActiveCorrectionRequest,
   getDocStatusPresentation,
   getStatusPresentation,
+  getTodayISO,
 } from '../utils/formatters';
 import { NavItem, WorkspaceShell } from './WorkspaceShell';
 
-type AdminTab = 'dashboard' | 'verification' | 'sujets' | 'configuration' | 'comptes' | 'support';
+type AdminTab =
+  | 'dashboard'
+  | 'verification'
+  | 'notifications'
+  | 'sujets'
+  | 'configuration'
+  | 'comptes'
+  | 'support';
 
-function getProgressBarWidthClass(pct: number): string {
-  if (pct <= 0) return 'w-0';
-  if (pct <= 10) return 'w-[10%]';
-  if (pct <= 20) return 'w-[20%]';
-  if (pct <= 30) return 'w-[30%]';
-  if (pct <= 40) return 'w-[40%]';
-  if (pct <= 50) return 'w-1/2';
-  if (pct <= 60) return 'w-[60%]';
-  if (pct <= 70) return 'w-[70%]';
-  if (pct <= 80) return 'w-[80%]';
-  if (pct <= 90) return 'w-[90%]';
-  return 'w-full';
+type AdminCommSubTab = 'boite' | 'envoyer' | 'annonces' | 'journal';
+
+function hasExpiredPendingCorrection(dossier: CandidateDossier): boolean {
+  return (dossier.correctionRequests || []).some(
+    (req) => req.status === 'pending' && (computeDeadlineInfo(req.deadline)?.isExpired ?? false)
+  );
+}
+
+function countActivePendingCorrections(dossier: CandidateDossier): number {
+  const ids = new Set<string>();
+  for (const doc of dossier.documents) {
+    if (doc.status === 'a_corriger') ids.add(doc.requirementId);
+  }
+  for (const req of dossier.correctionRequests || []) {
+    if (req.status === 'pending') ids.add(req.requirementId);
+  }
+  return ids.size;
 }
 
 export const AdminWorkspace: React.FC = () => {
   const {
+    currentUser,
     dossiers,
     subjects,
     accounts,
+    notifications,
+    announcements,
+    auditLogs,
+    emailStatus,
     campaignConfig,
     supportTickets,
+    navigationFocus,
+    clearNavigationFocus,
+    openNotificationTarget,
+    markNotificationRead,
+    markAllNotificationsRead,
     reviewDocumentStatus,
+    requestDocumentCorrection,
+    extendCorrectionDeadline,
+    updateDeadlinePolicy,
+    runDeadlineCheck,
+    sendAdminNotification,
+    publishAnnouncement,
+    toggleAnnouncementActive,
     validateAdministrativeEnrollment,
     upsertThesisSubject,
     toggleSubjectOpen,
@@ -62,10 +109,15 @@ export const AdminWorkspace: React.FC = () => {
   } = useGCD();
 
   const [activeTab, setActiveTab] = useState<AdminTab>('dashboard');
+  const [commSubTab, setCommSubTab] = useState<AdminCommSubTab>('boite');
+  const [notifFilter, setNotifFilter] = useState<'all' | 'unread'>('all');
   const [banner, setBanner] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
 
   // Verification tab state
-  const [verifFilter, setVerifFilter] = useState<'ALL' | 'ADMIS' | 'A_VERIFIER' | 'INSCRIT'>('ALL');
+  const [verifFilter, setVerifFilter] = useState<
+    'ALL' | 'ADMIS' | 'A_VERIFIER' | 'DELAI_EXPIRE' | 'INSCRIT'
+  >('ALL');
+  const [verifSearch, setVerifSearch] = useState('');
   const nonDraftDossiers = useMemo(
     () => dossiers.filter((d) => d.status !== 'brouillon'),
     [dossiers]
@@ -75,6 +127,11 @@ export const AdminWorkspace: React.FC = () => {
   );
   const [correctionTargetReqId, setCorrectionTargetReqId] = useState<string | null>(null);
   const [correctionReason, setCorrectionReason] = useState('');
+  const [correctionDeadline, setCorrectionDeadline] = useState(() =>
+    addDaysISO(getTodayISO(), campaignConfig.deadlinePolicy.defaultCorrectionDays)
+  );
+  const [extendTargetReqId, setExtendTargetReqId] = useState<string | null>(null);
+  const [extendNewDeadline, setExtendNewDeadline] = useState('');
 
   // Thesis subject form state
   const [showSubjectForm, setShowSubjectForm] = useState(false);
@@ -122,78 +179,165 @@ export const AdminWorkspace: React.FC = () => {
   // Support reply map
   const [ticketReplies, setTicketReplies] = useState<Record<string, string>>({});
 
+  // Calendar controlled draft state (prevents firing notifications on every keystroke)
+  const [calDraft, setCalDraft] = useState({
+    openDate: campaignConfig.openDate,
+    submissionDeadline: campaignConfig.submissionDeadline,
+    interviewPeriod: campaignConfig.interviewPeriod,
+    enrollmentDeadline: campaignConfig.enrollmentDeadline,
+    waitlistEnrollmentPeriod: campaignConfig.waitlistEnrollmentPeriod || '',
+  });
+  const [notifyCalendarCandidates, setNotifyCalendarCandidates] = useState(true);
+
+  useEffect(() => {
+    setCalDraft({
+      openDate: campaignConfig.openDate,
+      submissionDeadline: campaignConfig.submissionDeadline,
+      interviewPeriod: campaignConfig.interviewPeriod,
+      enrollmentDeadline: campaignConfig.enrollmentDeadline,
+      waitlistEnrollmentPeriod: campaignConfig.waitlistEnrollmentPeriod || '',
+    });
+  }, [
+    campaignConfig.openDate,
+    campaignConfig.submissionDeadline,
+    campaignConfig.interviewPeriod,
+    campaignConfig.enrollmentDeadline,
+    campaignConfig.waitlistEnrollmentPeriod,
+  ]);
+
+  // Targeted / collective notification form state
+  const candidateAccounts = useMemo(
+    () => accounts.filter((a) => a.role === 'candidat' && a.active),
+    [accounts]
+  );
+  const [msgTargetType, setMsgTargetType] = useState<
+    'individual' | 'all_candidates' | 'correction_pending' | 'status' | 'subject'
+  >('individual');
+  const [msgTargetAccountId, setMsgTargetAccountId] = useState<string>(
+    candidateAccounts[0]?.id || ''
+  );
+  const [msgTargetStatus, setMsgTargetStatus] = useState<ApplicationStatus>('entretien');
+  const [msgTargetSubjectId, setMsgTargetSubjectId] = useState<string>(subjects[0]?.id || '');
+  const [msgTitle, setMsgTitle] = useState('');
+  const [msgBody, setMsgBody] = useState('');
+  const [msgDeadline, setMsgDeadline] = useState('');
+  const [msgActionLabel, setMsgActionLabel] = useState<NotificationActionLabel>('Voir');
+  const [msgUrgent, setMsgUrgent] = useState(false);
+  const [msgSendEmail, setMsgSendEmail] = useState(false);
+
+  // Public announcement form state
+  const [annTitle, setAnnTitle] = useState('');
+  const [annMessage, setAnnMessage] = useState('');
+  const [annImportant, setAnnImportant] = useState(true);
+  const [annNotifyCandidates, setAnnNotifyCandidates] = useState(false);
+
+  // Navigation focus from notification clicks
+  useEffect(() => {
+    if (!navigationFocus) return;
+    const validTabs: AdminTab[] = [
+      'dashboard',
+      'verification',
+      'notifications',
+      'sujets',
+      'configuration',
+      'comptes',
+      'support',
+    ];
+    if (validTabs.includes(navigationFocus.tab as AdminTab)) {
+      setActiveTab(navigationFocus.tab as AdminTab);
+    }
+    if (navigationFocus.dossierId) {
+      setVerifFilter('ALL');
+      setVerifSearch('');
+      setSelectedDossierId(navigationFocus.dossierId);
+      setCorrectionTargetReqId(null);
+      setExtendTargetReqId(null);
+    }
+    clearNavigationFocus();
+  }, [navigationFocus, clearNavigationFocus]);
+
   // Stats
   const stats = useMemo(() => {
     const total = dossiers.length;
-    const brouillons = dossiers.filter((d) => d.status === 'brouillon').length;
     const soumisEnExamen = dossiers.filter(
-      (d) => d.status === 'soumis' || d.status === 'en_cours'
+      (d) => d.status === 'soumis' || d.status === 'en_cours' || d.status === 'entretien'
     ).length;
-    const entretiens = dossiers.filter((d) => d.status === 'entretien').length;
     const admis = dossiers.filter((d) => d.status === 'admis').length;
     const attente = dossiers.filter((d) => d.status === 'liste_attente').length;
     const inscrits = dossiers.filter((d) => d.status === 'inscrit').length;
-    const nonRetenus = dossiers.filter((d) => d.status === 'non_retenu').length;
-    const totalWishes = nonDraftDossiers.reduce(
-      (acc, d) => acc + d.subjectChoices.length,
-      0
-    );
     const docsPendingReview = nonDraftDossiers.reduce(
       (acc, d) => acc + d.documents.filter((doc) => doc.status === 'deposee').length,
       0
     );
     const docsToCorrect = dossiers.reduce(
-      (acc, d) => acc + d.documents.filter((doc) => doc.status === 'a_corriger').length,
+      (acc, d) => acc + countActivePendingCorrections(d),
       0
     );
+    const expiredDeadlines = dossiers.filter((d) => hasExpiredPendingCorrection(d)).length;
     return {
       total,
-      brouillons,
       soumisEnExamen,
-      entretiens,
       admis,
       attente,
       inscrits,
-      nonRetenus,
-      totalWishes,
       docsPendingReview,
       docsToCorrect,
+      expiredDeadlines,
     };
   }, [dossiers, nonDraftDossiers]);
 
   const openTicketsCount = supportTickets.filter((t) => t.status === 'ouvert').length;
+  const unreadNotifCount = useMemo(
+    () => notifications.filter((n) => !n.read).length,
+    [notifications]
+  );
+  const hasUrgentUnread = useMemo(
+    () => notifications.some((n) => !n.read && (n.urgent || n.actionRequired)),
+    [notifications]
+  );
+  const filteredNotifications = useMemo(
+    () => (notifFilter === 'unread' ? notifications.filter((n) => !n.read) : notifications),
+    [notifications, notifFilter]
+  );
 
   const navItems: NavItem[] = [
     {
       id: 'dashboard',
-      label: 'Tableau de bord',
+      label: 'Vue d’ensemble',
       icon: <BarChart3 className="w-4 h-4" />,
     },
     {
       id: 'verification',
-      label: 'Vérification & Inscriptions',
+      label: 'Candidatures & Pièces',
       icon: <FileCheck2 className="w-4 h-4" />,
-      badgeCount: stats.docsPendingReview + stats.admis,
-      badgeTone: 'neutral',
+      badgeCount: stats.docsPendingReview + stats.expiredDeadlines + stats.admis,
+      badgeTone: stats.expiredDeadlines > 0 ? 'alert' : 'neutral',
+    },
+    {
+      id: 'notifications',
+      label: 'Notifications & Annonces',
+      icon: <Bell className="w-4 h-4" />,
+      badgeCount: unreadNotifCount,
+      badgeTone: hasUrgentUnread ? 'alert' : 'neutral',
     },
     {
       id: 'sujets',
-      label: 'Sujets de thèse',
+      label: 'Sujets',
       icon: <BookOpen className="w-4 h-4" />,
     },
     {
       id: 'configuration',
-      label: 'Pièces, Règles & Dates',
+      label: 'Paramètres',
       icon: <Settings className="w-4 h-4" />,
     },
     {
       id: 'comptes',
-      label: 'Candidats & Intervenants',
+      label: 'Utilisateurs',
       icon: <Users className="w-4 h-4" />,
     },
     {
       id: 'support',
-      label: 'Support candidats',
+      label: 'Support',
       icon: <MessageSquare className="w-4 h-4" />,
       badgeCount: openTicketsCount,
       badgeTone: openTicketsCount > 0 ? 'alert' : 'neutral',
@@ -201,15 +345,28 @@ export const AdminWorkspace: React.FC = () => {
   ];
 
   const filteredVerificationDossiers = useMemo(() => {
+    const q = verifSearch.trim().toLowerCase();
     return nonDraftDossiers.filter((d) => {
-      if (verifFilter === 'ADMIS') return d.status === 'admis';
-      if (verifFilter === 'INSCRIT') return d.status === 'inscrit';
-      if (verifFilter === 'A_VERIFIER') {
-        return d.documents.some((doc) => doc.status === 'deposee' || doc.status === 'a_corriger');
+      if (verifFilter === 'ADMIS' && d.status !== 'admis') return false;
+      if (verifFilter === 'INSCRIT' && d.status !== 'inscrit') return false;
+      if (verifFilter === 'DELAI_EXPIRE' && !hasExpiredPendingCorrection(d)) return false;
+      if (
+        verifFilter === 'A_VERIFIER' &&
+        !d.documents.some((doc) => doc.status === 'deposee' || doc.status === 'a_corriger') &&
+        countActivePendingCorrections(d) === 0
+      ) {
+        return false;
       }
-      return true;
+      if (!q) return true;
+      const fullName = `${d.personalInfo.firstName} ${d.personalInfo.lastName}`.toLowerCase();
+      return (
+        fullName.includes(q) ||
+        d.dossierNumber.toLowerCase().includes(q) ||
+        d.personalInfo.cne.toLowerCase().includes(q) ||
+        d.personalInfo.cin.toLowerCase().includes(q)
+      );
     });
-  }, [nonDraftDossiers, verifFilter]);
+  }, [nonDraftDossiers, verifFilter, verifSearch]);
 
   const selectedDossier =
     nonDraftDossiers.find((d) => d.id === selectedDossierId) || filteredVerificationDossiers[0];
@@ -233,7 +390,7 @@ export const AdminWorkspace: React.FC = () => {
     if (!sujForm.title.trim() || !sujForm.supervisor.trim() || !sujForm.laboratoire.trim()) {
       setBanner({
         tone: 'error',
-        text: 'Veuillez renseigner au minimum l’intitulé, le laboratoire et le directeur de thèse.',
+        text: 'Intitulé, laboratoire et encadrant requis.',
       });
       return;
     }
@@ -242,9 +399,7 @@ export const AdminWorkspace: React.FC = () => {
     setEditingSubjectId(undefined);
     setBanner({
       tone: 'success',
-      text: editingSubjectId
-        ? 'Sujet de thèse mis à jour.'
-        : 'Nouveau sujet de thèse publié au catalogue.',
+      text: editingSubjectId ? 'Sujet mis à jour.' : 'Sujet publié.',
     });
   };
 
@@ -253,17 +408,16 @@ export const AdminWorkspace: React.FC = () => {
     if (!newReqCode.trim() || !newReqLabel.trim() || newReqFormats.length === 0) {
       setBanner({
         tone: 'error',
-        text: 'Précisez un code court, l’intitulé de la pièce et au moins un format accepté.',
+        text: 'Code, intitulé et format requis.',
       });
       return;
     }
     upsertDocumentRequirement({
       code: newReqCode.trim().toUpperCase(),
       label: newReqLabel.trim(),
-      description: newReqDesc.trim() || 'Pièce justificative demandée par l’administration.',
+      description: newReqDesc.trim() || 'Pièce justificative demandée.',
       instructions:
-        newReqInstructions.trim() ||
-        'Déposez un document lisible respectant le format requis.',
+        newReqInstructions.trim() || 'Document lisible au format requis.',
       stage: newReqStage,
       required: newReqRequired,
       acceptedFormats: newReqFormats,
@@ -275,14 +429,14 @@ export const AdminWorkspace: React.FC = () => {
     setNewReqInstructions('');
     setBanner({
       tone: 'success',
-      text: 'Nouvelle pièce ajoutée : elle est immédiatement visible dans l’espace des candidats.',
+      text: 'Pièce ajoutée.',
     });
   };
 
   const handleCreateIntervenant = (e: React.FormEvent) => {
     e.preventDefault();
     if (!staffFullName.trim() || !staffEmail.trim().includes('@')) {
-      setBanner({ tone: 'error', text: 'Nom complet et e-mail valide requis pour l’intervenant.' });
+      setBanner({ tone: 'error', text: 'Nom et e-mail valide requis.' });
       return;
     }
     upsertIntervenantAccount({
@@ -296,12 +450,12 @@ export const AdminWorkspace: React.FC = () => {
     setStaffFullName('');
     setStaffEmail('');
     setStaffLab('');
-    setBanner({ tone: 'success', text: 'Compte intervenant créé et activé avec succès.' });
+    setBanner({ tone: 'success', text: 'Compte créé.' });
   };
 
   return (
     <WorkspaceShell
-      workspaceTitle="Administration CEDoc"
+      workspaceTitle="Administration"
       activeTab={activeTab}
       onSelectTab={(id) => setActiveTab(id as AdminTab)}
       navItems={navItems}
@@ -313,26 +467,24 @@ export const AdminWorkspace: React.FC = () => {
             setBanner({
               tone: 'success',
               text: !campaignConfig.resultsPublished
-                ? 'Résultats officiels publiés et notifications envoyées aux candidats.'
-                : 'Affichage public des notes suspendu.',
+                ? 'Résultats publiés.'
+                : 'Publication suspendue.',
             });
           }}
-          className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
             campaignConfig.resultsPublished
               ? 'bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100'
               : 'bg-blue-700 text-white hover:bg-blue-800'
           }`}
         >
-          {campaignConfig.resultsPublished
-            ? '✓ Résultats publiés'
-            : 'Publier officiellement les résultats'}
+          {campaignConfig.resultsPublished ? '✓ Résultats publiés' : 'Publier les résultats'}
         </button>
       }
     >
-      <div className="space-y-6">
+      <div className="space-y-5">
         {banner && (
           <div
-            className={`p-4 rounded-xl border text-sm flex items-center justify-between gap-4 ${
+            className={`px-4 py-3 rounded-xl border text-xs sm:text-sm flex items-center justify-between gap-4 ${
               banner.tone === 'success'
                 ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
                 : 'bg-red-50 border-red-200 text-red-950'
@@ -349,293 +501,292 @@ export const AdminWorkspace: React.FC = () => {
             <button
               type="button"
               onClick={() => setBanner(null)}
-              className="text-xs font-semibold underline shrink-0"
+              className="text-xs font-semibold underline shrink-0 cursor-pointer"
             >
               Fermer
             </button>
           </div>
         )}
 
-        {/* TAB 1: TABLEAU DE BORD */}
+        {/* TAB 1: VUE D'ENSEMBLE */}
         {activeTab === 'dashboard' && (
-          <div className="space-y-6">
-            <div>
-              <h1 className="text-xl font-bold text-slate-900">
-                Tableau de bord du Pôle d’Études Doctorales ({campaignConfig.academicYear})
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+                Session {campaignConfig.academicYear}
               </h1>
-              <p className="text-xs text-slate-600 mt-1">
-                Suivi consolidé des candidats ({campaignConfig.requiredSubjectChoices} sujets choisis par dossier), de l’avancement des commissions et des inscriptions définitives.
-              </p>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {stats.expiredDeadlines > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVerifFilter('DELAI_EXPIRE');
+                      setActiveTab('verification');
+                    }}
+                    className="px-3.5 py-1.5 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
+                  >
+                    Délais expirés ({stats.expiredDeadlines})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVerifFilter('A_VERIFIER');
+                    setActiveTab('verification');
+                  }}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors cursor-pointer"
+                >
+                  Vérifier les pièces ({stats.docsPendingReview})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVerifFilter('ADMIS');
+                    setActiveTab('verification');
+                  }}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
+                >
+                  Inscriptions ({stats.admis})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('notifications')}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                >
+                  Notifications ({unreadNotifCount})
+                </button>
+              </div>
             </div>
 
-            {/* KPI Stat Grid */}
+            {/* Single Consolidated Metric Strip */}
             <div className="bg-white border border-slate-200 rounded-xl grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
-              <div className="p-5">
-                <p className="text-xs text-slate-500">Candidats & Vœux exprimés</p>
+              <div className="p-4 sm:p-5">
+                <p className="text-xs text-slate-500">Dossiers enregistrés</p>
                 <p className="text-2xl font-bold font-mono text-slate-900 tabular-nums mt-1">
-                  {stats.total}{' '}
-                  <span className="text-xs font-normal text-slate-500">
-                    ({stats.totalWishes} vœux soumis)
-                  </span>
+                  {stats.total}
                 </p>
               </div>
-              <div className="p-5">
-                <p className="text-xs text-slate-500">En examen & Entretiens</p>
+              <div className="p-4 sm:p-5">
+                <p className="text-xs text-slate-500">En sélection</p>
                 <p className="text-2xl font-bold font-mono text-blue-700 tabular-nums mt-1">
-                  {stats.soumisEnExamen + stats.entretiens}
+                  {stats.soumisEnExamen}
                 </p>
               </div>
-              <div className="p-5">
-                <p className="text-xs text-slate-500">Admis & Liste d’attente</p>
+              <div className="p-4 sm:p-5">
+                <p className="text-xs text-slate-500">Admis (liste principale)</p>
                 <p className="text-2xl font-bold font-mono text-emerald-700 tabular-nums mt-1">
                   {stats.admis}{' '}
-                  <span className="text-xs font-normal text-amber-700">
-                    (+{stats.attente} attente)
-                  </span>
+                  {stats.attente > 0 && (
+                    <span className="text-xs font-normal text-amber-700">
+                      (+{stats.attente} attente)
+                    </span>
+                  )}
                 </p>
               </div>
-              <div className="p-5">
-                <p className="text-xs text-slate-500">Inscriptions définitives validées</p>
+              <div className="p-4 sm:p-5">
+                <p className="text-xs text-slate-500">Inscrits définitifs</p>
                 <p className="text-2xl font-bold font-mono text-slate-900 tabular-nums mt-1">
                   {stats.inscrits}
                 </p>
               </div>
             </div>
 
-            {/* Pipeline Breakdown & Subject Table */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-                <h2 className="text-base font-bold text-slate-900">
-                  Répartition des dossiers candidats par étape
+            {/* Consolidated Subjects & Enrollments Table */}
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-900">
+                  Suivi des sujets et inscriptions
                 </h2>
-                <div className="space-y-3 text-xs">
-                  {[
-                    { label: 'Brouillons non soumis', count: stats.brouillons, bar: 'bg-slate-400' },
-                    { label: 'Soumis / En présélection', count: stats.soumisEnExamen, bar: 'bg-blue-600' },
-                    { label: 'Convoqués à l’entretien', count: stats.entretiens, bar: 'bg-blue-800' },
-                    { label: 'Admis (attente inscription)', count: stats.admis, bar: 'bg-emerald-600' },
-                    { label: 'Liste d’attente', count: stats.attente, bar: 'bg-amber-500' },
-                    { label: 'Inscriptions validées', count: stats.inscrits, bar: 'bg-emerald-800' },
-                    { label: 'Non retenus (sur les 3 vœux)', count: stats.nonRetenus, bar: 'bg-red-500' },
-                  ].map((row) => {
-                    const pct = Math.round((row.count / Math.max(1, stats.total)) * 100);
-                    return (
-                      <div key={row.label} className="space-y-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-700 font-medium">{row.label}</span>
-                          <span className="font-mono font-semibold text-slate-900 tabular-nums">
-                            {row.count} ({pct}%)
-                          </span>
-                        </div>
-                        <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full ${row.bar} ${getProgressBarWidthClass(pct)}`}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
-                  <span className="text-slate-600">
-                    Pièces signalées « À corriger » :{' '}
-                    <strong className="font-mono text-red-700">{stats.docsToCorrect}</strong>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('verification')}
-                    className="font-semibold text-blue-700 hover:underline"
-                  >
-                    Vérifier les dossiers →
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('sujets')}
+                  className="text-xs font-semibold text-blue-700 hover:underline cursor-pointer"
+                >
+                  Gérer les sujets
+                </button>
               </div>
-
-              <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl overflow-hidden">
-                <div className="p-5 border-b border-slate-200 flex items-center justify-between">
-                  <h2 className="text-base font-bold text-slate-900">
-                    État des vœux et inscriptions par sujet de thèse
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('sujets')}
-                    className="text-xs font-semibold text-blue-700 hover:underline"
-                  >
-                    Gérer les sujets
-                  </button>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
-                        <th className="py-2.5 px-4">Code sujet</th>
-                        <th className="py-2.5 px-4">Établissement</th>
-                        <th className="py-2.5 px-4 text-right">Places</th>
-                        <th className="py-2.5 px-4 text-right">Vœux (C1·C2·C3)</th>
-                        <th className="py-2.5 px-4 text-right">Admis / Inscrits</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200">
-                      {subjects.map((suj) => {
-                        const candsWithChoice = nonDraftDossiers.filter((d) =>
-                          d.subjectChoices.some((c) => c.subjectId === suj.id)
-                        );
-                        const c1 = nonDraftDossiers.filter((d) =>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
+                      <th className="py-3 px-4">Code & Intitulé</th>
+                      <th className="py-3 px-4">Laboratoire</th>
+                      <th className="py-3 px-4 text-right">Places</th>
+                      <th className="py-3 px-4 text-right">Vœux</th>
+                      <th className="py-3 px-4 text-right">Admis / Inscrits</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {subjects.map((suj) => {
+                      const candsWithChoice = nonDraftDossiers.filter((d) =>
+                        d.subjectChoices.some((c) => c.subjectId === suj.id)
+                      );
+                      const admisOrInscrit = nonDraftDossiers.filter(
+                        (d) =>
                           d.subjectChoices.some(
-                            (c) => c.subjectId === suj.id && c.priority === 1
-                          )
-                        ).length;
-                        const c2 = nonDraftDossiers.filter((d) =>
-                          d.subjectChoices.some(
-                            (c) => c.subjectId === suj.id && c.priority === 2
-                          )
-                        ).length;
-                        const c3 = nonDraftDossiers.filter((d) =>
-                          d.subjectChoices.some(
-                            (c) => c.subjectId === suj.id && c.priority >= 3
-                          )
-                        ).length;
+                            (c) => c.subjectId === suj.id && c.status === 'admis'
+                          ) ||
+                          (d.status === 'inscrit' && d.confirmedSubjectId === suj.id)
+                      ).length;
 
-                        const admisOrInscrit = nonDraftDossiers.filter(
-                          (d) =>
-                            d.subjectChoices.some(
-                              (c) => c.subjectId === suj.id && c.status === 'admis'
-                            ) ||
-                            (d.status === 'inscrit' && d.confirmedSubjectId === suj.id)
-                        ).length;
-
-                        return (
-                          <tr key={suj.id} className="hover:bg-slate-50">
-                            <td className="py-3 px-4 font-mono font-semibold text-blue-700">
+                      return (
+                        <tr key={suj.id} className="hover:bg-slate-50">
+                          <td className="py-3 px-4 max-w-sm">
+                            <span className="font-mono font-semibold text-blue-700">
                               {suj.code}
-                            </td>
-                            <td className="py-3 px-4 text-slate-700 truncate max-w-[180px]">
-                              {suj.etablissement}
-                            </td>
-                            <td className="py-3 px-4 text-right font-mono tabular-nums">
-                              {suj.places}
-                            </td>
-                            <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
-                              <span className="font-semibold text-slate-900">
-                                {candsWithChoice.length}
-                              </span>{' '}
-                              <span className="text-slate-400">
-                                ({c1}·{c2}·{c3})
-                              </span>
-                            </td>
-                            <td className="py-3 px-4 text-right font-mono text-emerald-700 font-semibold tabular-nums">
-                              {admisOrInscrit} / {suj.places}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                            </span>
+                            <p className="text-slate-900 font-medium truncate mt-0.5">
+                              {suj.title}
+                            </p>
+                          </td>
+                          <td className="py-3 px-4 text-slate-600 truncate max-w-[220px]">
+                            {suj.laboratoire}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono tabular-nums">
+                            {suj.places}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-semibold text-slate-900 tabular-nums">
+                            {candsWithChoice.length}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono text-emerald-700 font-semibold tabular-nums">
+                            {admisOrInscrit} / {suj.places}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 2: VÉRIFICATION DES DOSSIERS & INSCRIPTIONS ADMINISTRATIVES */}
+        {/* TAB 2: CANDIDATURES & PIÈCES */}
         {activeTab === 'verification' && (
-          <div className="space-y-6">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-              <div>
-                <h1 className="text-xl font-bold text-slate-900">
-                  Contrôle de conformité des pièces et validation des inscriptions
-                </h1>
-                <p className="text-xs text-slate-600 mt-1">
-                  Vérifiez chaque pièce déposée. En cas d’anomalie, demandez une correction ciblée au candidat ; si tout est conforme pour un admis, validez son inscription définitive sur le sujet confirmé.
-                </p>
-              </div>
+          <div className="space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+                Candidatures, pièces & inscriptions
+              </h1>
 
-              <div className="inline-flex p-1 bg-white border border-slate-200 rounded-lg self-start">
-                {(
-                  [
-                    { id: 'ALL', label: 'Tous soumis' },
-                    { id: 'ADMIS', label: 'Admis à inscrire' },
-                    { id: 'A_VERIFIER', label: 'Pièces à vérifier' },
-                    { id: 'INSCRIT', label: 'Inscrits validés' },
-                  ] as const
-                ).map((tab) => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setVerifFilter(tab.id)}
-                    className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
-                      verifFilter === tab.id
-                        ? 'bg-slate-900 text-white'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={verifSearch}
+                    onChange={(e) => setVerifSearch(e.target.value)}
+                    placeholder="Rechercher..."
+                    className="pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                </div>
+
+                <div className="inline-flex flex-wrap p-1 bg-white border border-slate-200 rounded-lg">
+                  {(
+                    [
+                      { id: 'ALL', label: 'Tous' },
+                      { id: 'A_VERIFIER', label: 'À vérifier' },
+                      { id: 'DELAI_EXPIRE', label: `Expirés (${stats.expiredDeadlines})` },
+                      { id: 'ADMIS', label: 'Admis' },
+                      { id: 'INSCRIT', label: 'Inscrits' },
+                    ] as const
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setVerifFilter(tab.id)}
+                      className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                        verifFilter === tab.id
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Left list */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              {/* Dossiers List */}
               <div className="lg:col-span-4 bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-                <div className="p-4 text-xs font-semibold text-slate-600">
+                <div className="px-4 py-3 text-xs font-semibold text-slate-600">
                   Dossiers ({filteredVerificationDossiers.length})
                 </div>
-                {filteredVerificationDossiers.map((d) => {
-                  const st = getStatusPresentation(d.status);
-                  const pendingDocs = d.documents.filter((doc) => doc.status === 'deposee').length;
-                  const corrDocs = d.documents.filter((doc) => doc.status === 'a_corriger').length;
-                  return (
-                    <button
-                      key={d.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedDossierId(d.id);
-                        setCorrectionTargetReqId(null);
-                      }}
-                      className={`w-full text-left p-4 transition-colors ${
-                        selectedDossier?.id === d.id ? 'bg-blue-50/60' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-bold text-slate-900">
-                          {d.personalInfo.firstName} {d.personalInfo.lastName}
-                        </span>
-                        <span className={`text-xs font-semibold ${st.textClass}`}>
-                          {st.shortLabel}
-                        </span>
-                      </div>
-                      <p className="text-xs font-mono text-slate-500 mt-0.5">
-                        {d.dossierNumber} · {d.subjectChoices.length} vœux · {d.documents.length} fichier(s)
-                      </p>
-                      <p className="text-xs text-slate-600 mt-1">
-                        {corrDocs > 0 ? (
-                          <span className="text-red-700 font-medium">
-                            ⚠ {corrDocs} pièce(s) en attente de correction
-                          </span>
-                        ) : pendingDocs > 0 ? (
-                          <span className="text-blue-700 font-medium">
-                            {pendingDocs} pièce(s) à contrôler
-                          </span>
-                        ) : (
-                          <span className="text-emerald-700">✓ Pièces contrôlées</span>
-                        )}
-                      </p>
-                    </button>
-                  );
-                })}
+                {filteredVerificationDossiers.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-slate-500">Aucun dossier.</div>
+                ) : (
+                  <div className="divide-y divide-slate-200 max-h-[680px] overflow-y-auto">
+                    {filteredVerificationDossiers.map((d) => {
+                      const st = getStatusPresentation(d.status);
+                      const pendingDocs = d.documents.filter(
+                        (doc) => doc.status === 'deposee'
+                      ).length;
+                      const corrDocs = countActivePendingCorrections(d);
+                      const isExpired = hasExpiredPendingCorrection(d);
+                      const resubmittedCount = (d.correctionRequests || []).filter(
+                        (r) => r.status === 'resubmitted'
+                      ).length;
+                      return (
+                        <button
+                          key={d.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedDossierId(d.id);
+                            setCorrectionTargetReqId(null);
+                            setExtendTargetReqId(null);
+                          }}
+                          className={`w-full text-left px-4 py-3.5 transition-colors cursor-pointer ${
+                            selectedDossier?.id === d.id ? 'bg-blue-50/60' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-slate-900 truncate">
+                              {d.personalInfo.firstName} {d.personalInfo.lastName}
+                            </span>
+                            <span className={`text-xs font-semibold shrink-0 ${st.textClass}`}>
+                              {st.shortLabel}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-xs mt-1">
+                            <span className="font-mono text-slate-500">{d.dossierNumber}</span>
+                            {isExpired ? (
+                              <span className="text-red-700 font-semibold">Délai expiré</span>
+                            ) : corrDocs > 0 ? (
+                              <span className="text-red-700 font-medium">
+                                {corrDocs} à corriger
+                              </span>
+                            ) : resubmittedCount > 0 ? (
+                              <span className="text-blue-700 font-semibold">
+                                Corrigé soumis
+                              </span>
+                            ) : pendingDocs > 0 ? (
+                              <span className="text-blue-700 font-medium">
+                                {pendingDocs} à vérifier
+                              </span>
+                            ) : (
+                              <span className="text-emerald-700">Conforme</span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
-              {/* Right inspection panel */}
+              {/* Dossier Inspection */}
               <div className="lg:col-span-8">
                 {selectedDossier ? (
                   <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-                    <div className="p-6 space-y-4">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="p-5 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                         <div>
-                          <p className="text-xs font-mono font-semibold text-blue-700">
-                            {selectedDossier.dossierNumber} · CNE {selectedDossier.personalInfo.cne}
+                          <p className="text-xs font-mono text-slate-500">
+                            {selectedDossier.dossierNumber} · CNE {selectedDossier.personalInfo.cne}{' '}
+                            · CIN {selectedDossier.personalInfo.cin}
                           </p>
                           <h2 className="text-lg font-bold text-slate-900 mt-0.5">
                             {selectedDossier.personalInfo.firstName}{' '}
@@ -643,9 +794,11 @@ export const AdminWorkspace: React.FC = () => {
                           </h2>
                           <p className="text-xs text-slate-600">
                             Statut :{' '}
-                            <strong>{getStatusPresentation(selectedDossier.status).label}</strong>
+                            <strong className={getStatusPresentation(selectedDossier.status).textClass}>
+                              {getStatusPresentation(selectedDossier.status).label}
+                            </strong>
                             {selectedDossier.enrollmentNumber &&
-                              ` · Matricule : ${selectedDossier.enrollmentNumber}`}
+                              ` · Matricule ${selectedDossier.enrollmentNumber}`}
                           </p>
                         </div>
 
@@ -663,70 +816,76 @@ export const AdminWorkspace: React.FC = () => {
                               } else {
                                 setBanner({
                                   tone: 'success',
-                                  text: `Inscription administrative validée ! Matricule attribué : ${res.enrollmentNumber}`,
+                                  text: `Inscription validée (${res.enrollmentNumber}).`,
                                 });
                               }
                             }}
-                            className="px-4 py-2.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                            className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
                           >
                             <ShieldCheck className="w-4 h-4" />
                             {selectedDossier.status === 'inscrit'
                               ? 'Inscription validée'
-                              : 'Valider l’inscription définitive'}
+                              : 'Valider l’inscription'}
                           </button>
                         )}
                       </div>
 
-                      {/* Summary of the 3 chosen thesis subjects */}
-                      <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5 text-xs">
-                        <p className="font-semibold text-slate-800">
-                          Vœux de thèse du candidat ({selectedDossier.subjectChoices.length}) :
-                        </p>
-                        <div className="space-y-1">
-                          {[...selectedDossier.subjectChoices]
-                            .sort((a, b) => a.priority - b.priority)
-                            .map((ch) => {
-                              const s = subjects.find((item) => item.id === ch.subjectId);
-                              const st = getStatusPresentation(ch.status);
-                              const isConfirmed =
-                                selectedDossier.confirmedSubjectId === ch.subjectId;
-                              return (
-                                <div
-                                  key={ch.subjectId}
-                                  className="flex flex-wrap items-center justify-between gap-2"
-                                >
-                                  <span className="text-slate-700 truncate max-w-lg">
-                                    <strong className="font-mono">Choix n°{ch.priority} :</strong>{' '}
-                                    <span className="font-mono text-blue-700">
-                                      {s?.code || ch.subjectId}
-                                    </span>{' '}
-                                    — {s?.title || 'Sujet'}
-                                  </span>
-                                  <span className={`font-semibold ${st.textClass}`}>
-                                    {st.shortLabel}
-                                    {isConfirmed ? ' · Sujet d’inscription retenu' : ''}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                        </div>
+                      {/* Chosen Subjects */}
+                      <div className="pt-2 border-t border-slate-100 space-y-1 text-xs">
+                        {[...selectedDossier.subjectChoices]
+                          .sort((a, b) => a.priority - b.priority)
+                          .map((ch) => {
+                            const s = subjects.find((item) => item.id === ch.subjectId);
+                            const st = getStatusPresentation(ch.status);
+                            const isConfirmed =
+                              selectedDossier.confirmedSubjectId === ch.subjectId;
+                            return (
+                              <div
+                                key={ch.subjectId}
+                                className="flex flex-wrap items-center justify-between gap-2"
+                              >
+                                <span className="text-slate-700 truncate max-w-lg">
+                                  <strong className="font-mono">Choix {ch.priority} :</strong>{' '}
+                                  <span className="font-mono text-blue-700">
+                                    {s?.code || ch.subjectId}
+                                  </span>{' '}
+                                  — {s?.title || 'Sujet'}
+                                </span>
+                                <span className={`font-semibold ${st.textClass}`}>
+                                  {st.shortLabel}
+                                  {isConfirmed ? ' (Retenu)' : ''}
+                                </span>
+                              </div>
+                            );
+                          })}
                       </div>
                     </div>
 
-                    {/* All configured requirements check */}
+                    {/* Documents Checklist */}
                     <div className="divide-y divide-slate-200">
                       {campaignConfig.documentRequirements.map((req) => {
                         const uploaded = selectedDossier.documents.find(
                           (doc) => doc.requirementId === req.id
                         );
-                        const status = uploaded ? uploaded.status : 'manquante';
+                        const activeCorr = getActiveCorrectionRequest(selectedDossier, req.id);
+                        const resubmittedCorr = (
+                          selectedDossier.correctionRequests || []
+                        ).find((cr) => cr.requirementId === req.id && cr.status === 'resubmitted');
+                        const status = uploaded
+                          ? uploaded.status
+                          : activeCorr
+                          ? 'a_corriger'
+                          : 'manquante';
                         const pres = getDocStatusPresentation(status);
+                        const deadlineISO = activeCorr?.deadline || uploaded?.correctionDeadline;
+                        const dlInfo = computeDeadlineInfo(deadlineISO);
                         const isAskingCorrection = correctionTargetReqId === req.id;
+                        const isExtending = extendTargetReqId === req.id;
 
                         return (
-                          <div key={req.id} className="p-5 space-y-3">
-                            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-                              <div className="space-y-1">
+                          <div key={req.id} className="p-4 sm:p-5 space-y-2.5">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="space-y-0.5 min-w-0">
                                 <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                                   <span className="font-mono font-semibold text-slate-700">
                                     {req.code}
@@ -735,105 +894,258 @@ export const AdminWorkspace: React.FC = () => {
                                   <span>
                                     {req.stage === 'preinscription'
                                       ? 'Préinscription'
-                                      : 'Inscription définitive'}
+                                      : 'Inscription'}
                                   </span>
-                                  <span>·</span>
-                                  <span>{req.required ? 'Obligatoire' : 'Facultatif'}</span>
                                   <span>·</span>
                                   <span className={`font-semibold ${pres.textClass}`}>
                                     {pres.label}
                                   </span>
+                                  {resubmittedCorr && uploaded?.status === 'deposee' && (
+                                    <>
+                                      <span>·</span>
+                                      <span className="font-semibold text-blue-700">
+                                        Nouvelle version déposée
+                                      </span>
+                                    </>
+                                  )}
                                 </div>
-                                <h3 className="text-sm font-bold text-slate-900">{req.label}</h3>
+                                <h3 className="text-sm font-semibold text-slate-900">
+                                  {req.label}
+                                </h3>
                                 {uploaded ? (
-                                  <p className="text-xs font-mono text-slate-600">
-                                    {uploaded.fileName} ({formatFileSize(uploaded.fileSizeKB)}) · Déposé le{' '}
+                                  <p className="text-xs font-mono text-slate-500 truncate">
+                                    {uploaded.fileName} ({formatFileSize(uploaded.fileSizeKB)}) ·{' '}
                                     {formatDateFR(uploaded.uploadedAt, true)}
                                   </p>
                                 ) : (
-                                  <p className="text-xs text-amber-700">
-                                    Aucun fichier téléversé pour cette pièce.
-                                  </p>
+                                  <p className="text-xs text-amber-700">Non déposé</p>
                                 )}
-                                {uploaded?.reviewComment && (
-                                  <p className="text-xs text-red-700">
-                                    Motif signalé : {uploaded.reviewComment}
-                                  </p>
-                                )}
+                                {(activeCorr?.reason || uploaded?.reviewComment) &&
+                                  status === 'a_corriger' && (
+                                    <div className="text-xs space-y-0.5 pt-0.5">
+                                      <p className="text-red-700">
+                                        Motif : {activeCorr?.reason || uploaded?.reviewComment}
+                                      </p>
+                                      {deadlineISO && (
+                                        <p className="font-mono text-slate-600">
+                                          Date limite : {formatDateFR(deadlineISO)}
+                                          {dlInfo && (
+                                            <span className={`font-semibold ${dlInfo.textClass}`}>
+                                              {' '}
+                                              · {dlInfo.statusLabel}
+                                            </span>
+                                          )}
+                                          {dlInfo?.isExpired &&
+                                            !campaignConfig.deadlinePolicy
+                                              .autoRejectOnExpiredCorrection && (
+                                              <span className="font-sans text-slate-500">
+                                                {' '}
+                                                · Aucun rejet automatique
+                                              </span>
+                                            )}
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
                               </div>
 
-                              {uploaded && (
-                                <div className="flex items-center gap-2 shrink-0">
+                              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                {uploaded && (
                                   <button
                                     type="button"
                                     onClick={() => {
                                       reviewDocumentStatus(selectedDossier.id, req.id, 'validee');
                                       setCorrectionTargetReqId(null);
+                                      setExtendTargetReqId(null);
                                       setBanner({
                                         tone: 'success',
-                                        text: `Pièce « ${req.code} » marquée conforme.`,
+                                        text: `${req.code} validé conforme.`,
                                       });
                                     }}
-                                    className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors flex items-center gap-1"
+                                    className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
                                   >
                                     <Check className="w-3.5 h-3.5" />
                                     Conforme
                                   </button>
+                                )}
 
+                                {activeCorr && (
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      setCorrectionTargetReqId(isAskingCorrection ? null : req.id);
-                                      setCorrectionReason(
-                                        uploaded.reviewComment ||
-                                          'Document flou ou incomplet. Merci de téléverser un scan PDF lisible et cacheté.'
-                                      );
+                                      setCorrectionTargetReqId(null);
+                                      if (isExtending) {
+                                        setExtendTargetReqId(null);
+                                      } else {
+                                        setExtendTargetReqId(req.id);
+                                        const baseDate =
+                                          dlInfo?.isExpired ? getTodayISO() : activeCorr.deadline;
+                                        setExtendNewDeadline(addDaysISO(baseDate, 7));
+                                      }
                                     }}
-                                    className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors"
+                                    className="px-3 py-1.5 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition-colors inline-flex items-center gap-1 cursor-pointer"
                                   >
-                                    Demander correction
+                                    <CalendarClock className="w-3.5 h-3.5" />
+                                    Prolonger
                                   </button>
-                                </div>
-                              )}
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setExtendTargetReqId(null);
+                                    if (isAskingCorrection) {
+                                      setCorrectionTargetReqId(null);
+                                    } else {
+                                      setCorrectionTargetReqId(req.id);
+                                      setCorrectionReason(
+                                        activeCorr?.reason ||
+                                          uploaded?.reviewComment ||
+                                          (uploaded
+                                            ? `Votre ${req.label.toLowerCase()} est incomplet ou illisible.`
+                                            : `Pièce manquante : veuillez déposer ${req.label.toLowerCase()}.`)
+                                      );
+                                      setCorrectionDeadline(
+                                        activeCorr?.deadline ||
+                                          addDaysISO(
+                                            getTodayISO(),
+                                            campaignConfig.deadlinePolicy.defaultCorrectionDays
+                                          )
+                                      );
+                                    }
+                                  }}
+                                  className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors cursor-pointer"
+                                >
+                                  {uploaded ? 'À corriger' : 'Signaler manquant'}
+                                </button>
+                              </div>
                             </div>
 
                             {isAskingCorrection && (
-                              <div className="p-3.5 rounded-lg bg-red-50/70 border border-red-200 space-y-2.5">
-                                <label className="block text-xs font-semibold text-red-950">
-                                  Précisez l’anomalie au candidat (sera envoyée par notification) :
-                                </label>
-                                <input
-                                  type="text"
-                                  value={correctionReason}
-                                  onChange={(e) => setCorrectionReason(e.target.value)}
-                                  className="w-full px-3 py-1.5 text-xs bg-white border border-red-300 rounded-lg"
-                                />
+                              <div className="p-3 rounded-lg bg-red-50/70 border border-red-200 space-y-2">
+                                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                                  <input
+                                    type="text"
+                                    value={correctionReason}
+                                    onChange={(e) => setCorrectionReason(e.target.value)}
+                                    placeholder="Motif précis du refus ou de la correction..."
+                                    className="sm:col-span-8 px-3 py-1.5 text-xs bg-white border border-red-300 rounded-lg"
+                                  />
+                                  <input
+                                    type="date"
+                                    aria-label="Date limite de régularisation"
+                                    value={correctionDeadline}
+                                    onChange={(e) => setCorrectionDeadline(e.target.value)}
+                                    className="sm:col-span-4 px-3 py-1.5 text-xs font-mono bg-white border border-red-300 rounded-lg"
+                                  />
+                                </div>
                                 <div className="flex items-center justify-end gap-2">
                                   <button
                                     type="button"
                                     onClick={() => setCorrectionTargetReqId(null)}
-                                    className="px-3 py-1.5 text-xs text-slate-600"
+                                    className="px-2.5 py-1.5 text-xs text-slate-600 cursor-pointer"
                                   >
                                     Annuler
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      reviewDocumentStatus(
+                                      const res = requestDocumentCorrection(
                                         selectedDossier.id,
                                         req.id,
-                                        'a_corriger',
-                                        correctionReason
+                                        correctionReason,
+                                        correctionDeadline
                                       );
-                                      setCorrectionTargetReqId(null);
-                                      setBanner({
-                                        tone: 'success',
-                                        text: 'Demande de correction envoyée au candidat.',
-                                      });
+                                      if (res.ok) {
+                                        setCorrectionTargetReqId(null);
+                                        setBanner({
+                                          tone: 'success',
+                                          text: `Demande envoyée au candidat (échéance : ${formatDateFR(res.deadline)}).`,
+                                        });
+                                      } else {
+                                        setBanner({
+                                          tone: 'error',
+                                          text: res.error || 'Erreur lors de la demande.',
+                                        });
+                                      }
                                     }}
-                                    className="px-3.5 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-lg"
+                                    className="px-3 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-lg cursor-pointer"
                                   >
                                     Notifier le candidat
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {isExtending && activeCorr && (
+                              <div className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-semibold text-amber-950">
+                                    Nouvelle date limite :
+                                  </span>
+                                  <input
+                                    type="date"
+                                    value={extendNewDeadline}
+                                    onChange={(e) => setExtendNewDeadline(e.target.value)}
+                                    className="px-2.5 py-1 font-mono bg-white border border-amber-300 rounded-md"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const base = dlInfo?.isExpired
+                                        ? getTodayISO()
+                                        : activeCorr.deadline;
+                                      setExtendNewDeadline(addDaysISO(base, 3));
+                                    }}
+                                    className="px-2 py-1 font-mono font-semibold text-amber-900 bg-white border border-amber-300 rounded-md cursor-pointer"
+                                  >
+                                    +3 j
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const base = dlInfo?.isExpired
+                                        ? getTodayISO()
+                                        : activeCorr.deadline;
+                                      setExtendNewDeadline(addDaysISO(base, 7));
+                                    }}
+                                    className="px-2 py-1 font-mono font-semibold text-amber-900 bg-white border border-amber-300 rounded-md cursor-pointer"
+                                  >
+                                    +7 j
+                                  </button>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setExtendTargetReqId(null)}
+                                    className="px-2.5 py-1 text-slate-600 cursor-pointer"
+                                  >
+                                    Annuler
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const res = extendCorrectionDeadline(
+                                        selectedDossier.id,
+                                        req.id,
+                                        extendNewDeadline
+                                      );
+                                      if (res.ok) {
+                                        setExtendTargetReqId(null);
+                                        setBanner({
+                                          tone: 'success',
+                                          text: `Délai prolongé jusqu’au ${formatDateFR(extendNewDeadline)}.`,
+                                        });
+                                      } else {
+                                        setBanner({
+                                          tone: 'error',
+                                          text: res.error || 'Date invalide.',
+                                        });
+                                      }
+                                    }}
+                                    className="px-3 py-1 font-semibold text-white bg-amber-800 hover:bg-amber-900 rounded-md cursor-pointer"
+                                  >
+                                    Enregistrer
                                   </button>
                                 </div>
                               </div>
@@ -845,7 +1157,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                 ) : (
                   <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-sm text-slate-500">
-                    Aucun dossier à afficher.
+                    Aucun dossier sélectionné.
                   </div>
                 )}
               </div>
@@ -853,18 +1165,587 @@ export const AdminWorkspace: React.FC = () => {
           </div>
         )}
 
-        {/* TAB 3: GESTION DES SUJETS DE THÈSE */}
-        {activeTab === 'sujets' && (
-          <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <h1 className="text-xl font-bold text-slate-900">
-                  Gestion des sujets de thèse ({subjects.length})
-                </h1>
-                <p className="text-xs text-slate-600 mt-1">
-                  Ajoutez de nouveaux sujets proposés par les laboratoires, suivez la validation tripartite (Structure · Centre · Pôle) ou ajustez les quotas de places.
-                </p>
+        {/* TAB: NOTIFICATIONS, ENVOIS CIBLÉS, ANNONCES & TRAÇABILITÉ */}
+        {activeTab === 'notifications' && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+                Notifications & Annonces
+              </h1>
+
+              <div className="inline-flex flex-wrap p-1 bg-white border border-slate-200 rounded-lg text-xs">
+                {(
+                  [
+                    { id: 'boite', label: `Réception (${unreadNotifCount})` },
+                    { id: 'envoyer', label: 'Envoyer aux candidats' },
+                    { id: 'annonces', label: `Annonces publiques (${announcements.length})` },
+                    { id: 'journal', label: 'Traçabilité' },
+                  ] as const
+                ).map((sub) => (
+                  <button
+                    key={sub.id}
+                    type="button"
+                    onClick={() => setCommSubTab(sub.id)}
+                    className={`px-3 py-1.5 font-semibold rounded-md transition-colors cursor-pointer ${
+                      commSubTab === sub.id
+                        ? 'bg-slate-900 text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {sub.label}
+                  </button>
+                ))}
               </div>
+            </div>
+
+            {/* SUBTAB 1: RÉCEPTION ADMIN */}
+            {commSubTab === 'boite' && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="inline-flex p-1 bg-white border border-slate-200 rounded-lg text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setNotifFilter('all')}
+                      className={`px-2.5 py-1 font-semibold rounded-md cursor-pointer ${
+                        notifFilter === 'all'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Toutes ({notifications.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNotifFilter('unread')}
+                      className={`px-2.5 py-1 font-semibold rounded-md cursor-pointer ${
+                        notifFilter === 'unread'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Non lues ({unreadNotifCount})
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const res = await runDeadlineCheck();
+                        setBanner({
+                          tone: 'success',
+                          text:
+                            res.generatedCount > 0
+                              ? `${res.generatedCount} rappel(s) ou alerte(s) d’échéance généré(s).`
+                              : 'Échéances à jour (aucun nouveau rappel à déclencher).',
+                        });
+                      }}
+                      className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Vérifier les délais
+                    </button>
+
+                    {unreadNotifCount > 0 && currentUser && (
+                      <button
+                        type="button"
+                        onClick={() => markAllNotificationsRead(currentUser.id)}
+                        className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg cursor-pointer"
+                      >
+                        Tout marquer comme lu
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
+                  {filteredNotifications.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-slate-500">
+                      Aucune notification.
+                    </div>
+                  ) : (
+                    filteredNotifications.map((n) => {
+                      const dlInfo = computeDeadlineInfo(n.deadline);
+                      return (
+                        <div
+                          key={n.id}
+                          className={`p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                            !n.read ? 'bg-blue-50/30' : ''
+                          }`}
+                        >
+                          <div className="space-y-1 min-w-0 max-w-2xl">
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                              <span
+                                className={
+                                  !n.read
+                                    ? 'font-semibold text-blue-700'
+                                    : 'font-medium text-slate-400'
+                                }
+                              >
+                                {!n.read ? 'Non lu' : 'Lu'}
+                              </span>
+                              <span className="text-slate-300">·</span>
+                              <span className="font-mono text-slate-500">
+                                {formatDateFR(n.createdAt, true)}
+                              </span>
+                              {n.urgent && (
+                                <>
+                                  <span className="text-slate-300">·</span>
+                                  <span className="font-semibold text-red-700">Prioritaire</span>
+                                </>
+                              )}
+                              {n.deadline && (
+                                <>
+                                  <span className="text-slate-300">·</span>
+                                  <span
+                                    className={`font-mono font-medium ${
+                                      dlInfo?.textClass || 'text-slate-600'
+                                    }`}
+                                  >
+                                    Échéance {formatDateFR(n.deadline)}
+                                    {dlInfo ? ` (${dlInfo.shortCountdown})` : ''}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            <h2 className="text-sm font-semibold text-slate-900">{n.title}</h2>
+                            <p className="text-xs sm:text-sm text-slate-600">{n.message}</p>
+                          </div>
+
+                          <div className="flex items-center gap-3 shrink-0">
+                            {!n.read && (
+                              <button
+                                type="button"
+                                onClick={() => markNotificationRead(n.id)}
+                                className="text-xs font-medium text-slate-500 hover:text-slate-800 underline cursor-pointer"
+                              >
+                                Marquer comme lu
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => openNotificationTarget(n)}
+                              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors cursor-pointer"
+                            >
+                              {n.actionLabel || 'Voir'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* SUBTAB 2: ENVOYER UNE NOTIFICATION CIBLÉE OU COLLECTIVE */}
+            {commSubTab === 'envoyer' && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const res = sendAdminNotification({
+                    targetType: msgTargetType,
+                    targetAccountId: msgTargetType === 'individual' ? msgTargetAccountId : undefined,
+                    targetStatus: msgTargetType === 'status' ? msgTargetStatus : undefined,
+                    targetSubjectId: msgTargetType === 'subject' ? msgTargetSubjectId : undefined,
+                    title: msgTitle,
+                    message: msgBody,
+                    urgent: msgUrgent,
+                    deadline: msgDeadline || undefined,
+                    actionLabel: msgActionLabel,
+                    actionTab:
+                      msgActionLabel === 'Corriger'
+                        ? 'documents'
+                        : msgActionLabel === 'Consulter le résultat'
+                        ? 'suivi'
+                        : 'apercu',
+                    sendEmail: emailStatus.configured ? msgSendEmail : false,
+                  });
+                  if (!res.ok) {
+                    setBanner({
+                      tone: 'error',
+                      text: res.error || 'Envoi impossible.',
+                    });
+                  } else {
+                    setMsgTitle('');
+                    setMsgBody('');
+                    setMsgDeadline('');
+                    setBanner({
+                      tone: 'success',
+                      text: `Notification envoyée à ${res.sentCount} candidat(s).`,
+                    });
+                  }
+                }}
+                className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 max-w-3xl"
+              >
+                <h2 className="text-sm font-bold text-slate-900">
+                  Notification individuelle ou collective aux candidats
+                </h2>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Destinataires</label>
+                    <select
+                      value={msgTargetType}
+                      onChange={(e) =>
+                        setMsgTargetType(
+                          e.target.value as
+                            | 'individual'
+                            | 'all_candidates'
+                            | 'correction_pending'
+                            | 'status'
+                            | 'subject'
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                    >
+                      <option value="individual">Un candidat précis</option>
+                      <option value="all_candidates">Tous les candidats actifs</option>
+                      <option value="correction_pending">
+                        Candidats avec pièce à régulariser
+                      </option>
+                      <option value="status">Par statut de candidature</option>
+                      <option value="subject">Par sujet de thèse choisi</option>
+                    </select>
+                  </div>
+
+                  {msgTargetType === 'individual' && (
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Candidat</label>
+                      <select
+                        value={msgTargetAccountId}
+                        onChange={(e) => setMsgTargetAccountId(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                      >
+                        {candidateAccounts.map((acc) => {
+                          const dos = dossiers.find((d) => d.accountId === acc.id);
+                          return (
+                            <option key={acc.id} value={acc.id}>
+                              {acc.fullName} {dos ? `(${dos.dossierNumber})` : ''}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+                  )}
+
+                  {msgTargetType === 'status' && (
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Statut ciblé</label>
+                      <select
+                        value={msgTargetStatus}
+                        onChange={(e) => setMsgTargetStatus(e.target.value as ApplicationStatus)}
+                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                      >
+                        <option value="soumis">Soumis</option>
+                        <option value="en_cours">Présélectionné</option>
+                        <option value="entretien">Convoqué à l’entretien</option>
+                        <option value="admis">Admis en liste principale</option>
+                        <option value="liste_attente">Liste d’attente</option>
+                        <option value="inscrit">Inscrit définitif</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {msgTargetType === 'subject' && (
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Sujet ciblé</label>
+                      <select
+                        value={msgTargetSubjectId}
+                        onChange={(e) => setMsgTargetSubjectId(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                      >
+                        {subjects.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} — {s.title.slice(0, 45)}...
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="sm:col-span-2">
+                    <label className="block font-semibold text-slate-700 mb-1">Titre court *</label>
+                    <input
+                      type="text"
+                      value={msgTitle}
+                      onChange={(e) => setMsgTitle(e.target.value)}
+                      placeholder="Ex. Document complémentaire requis"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Échéance (optionnel)
+                    </label>
+                    <input
+                      type="date"
+                      value={msgDeadline}
+                      onChange={(e) => setMsgDeadline(e.target.value)}
+                      className="w-full px-3 py-2 font-mono border border-slate-200 rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                <div className="text-xs">
+                  <label className="block font-semibold text-slate-700 mb-1">Message clair *</label>
+                  <textarea
+                    rows={3}
+                    value={msgBody}
+                    onChange={(e) => setMsgBody(e.target.value)}
+                    placeholder="Rédigez un message concis indiquant l’action attendue..."
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center text-xs">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Bouton d’action affiché au candidat
+                    </label>
+                    <select
+                      value={msgActionLabel}
+                      onChange={(e) =>
+                        setMsgActionLabel(e.target.value as NotificationActionLabel)
+                      }
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                    >
+                      <option value="Voir">Voir</option>
+                      <option value="Corriger">Corriger</option>
+                      <option value="Consulter le résultat">Consulter le résultat</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2 pt-2 sm:pt-5">
+                    <label className="inline-flex items-center gap-2 font-semibold text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={msgUrgent}
+                        onChange={(e) => setMsgUrgent(e.target.checked)}
+                      />
+                      Marquer comme prioritaire / urgent
+                    </label>
+
+                    <label
+                      className={`flex items-center gap-2 ${
+                        emailStatus.configured
+                          ? 'text-slate-700 cursor-pointer'
+                          : 'text-slate-400 cursor-not-allowed'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={!emailStatus.configured}
+                        checked={emailStatus.configured && msgSendEmail}
+                        onChange={(e) => setMsgSendEmail(e.target.checked)}
+                      />
+                      <Mail className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {emailStatus.configured
+                          ? `Envoyer également par e-mail (${emailStatus.host})`
+                          : 'Canal e-mail non configuré (notification interne uniquement)'}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="submit"
+                    className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    Envoyer la notification
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* SUBTAB 3: ANNONCES PUBLIQUES (SANS DONNÉES PERSONNELLES) */}
+            {commSubTab === 'annonces' && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const res = publishAnnouncement({
+                      title: annTitle,
+                      message: annMessage,
+                      important: annImportant,
+                      notifyCandidates: annNotifyCandidates,
+                    });
+                    if (!res.ok) {
+                      setBanner({
+                        tone: 'error',
+                        text: res.error || 'Publication refusée.',
+                      });
+                    } else {
+                      setAnnTitle('');
+                      setAnnMessage('');
+                      setBanner({
+                        tone: 'success',
+                        text: 'Annonce publique publiée sur le portail.',
+                      });
+                    }
+                  }}
+                  className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 space-y-3.5 text-xs"
+                >
+                  <div className="flex items-center gap-2">
+                    <Megaphone className="w-4 h-4 text-blue-700" />
+                    <h2 className="text-sm font-bold text-slate-900">Nouvelle annonce officielle</h2>
+                  </div>
+                  <p className="text-slate-500">
+                    Affichée publiquement sur la page d’accueil. Aucune donnée personnelle (nom,
+                    CIN, CNE, e-mail) ne doit y figurer.
+                  </p>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Titre *</label>
+                    <input
+                      type="text"
+                      value={annTitle}
+                      onChange={(e) => setAnnTitle(e.target.value)}
+                      placeholder="Ex. Ouverture des candidatures 2026–2027"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Message institutionnel *
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={annMessage}
+                      onChange={(e) => setAnnMessage(e.target.value)}
+                      placeholder="Information générale de campagne..."
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={annImportant}
+                        onChange={(e) => setAnnImportant(e.target.checked)}
+                      />
+                      Mettre en évidence sur la page d’accueil
+                    </label>
+                    <label className="flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={annNotifyCandidates}
+                        onChange={(e) => setAnnNotifyCandidates(e.target.checked)}
+                      />
+                      Notifier également tous les candidats inscrits
+                    </label>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2 px-4 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg cursor-pointer"
+                  >
+                    Publier l’annonce
+                  </button>
+                </form>
+
+                <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
+                  <div className="px-5 py-3.5 text-xs font-semibold text-slate-600">
+                    Annonces enregistrées ({announcements.length})
+                  </div>
+                  {announcements.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-500">Aucune annonce.</div>
+                  ) : (
+                    announcements.map((ann) => (
+                      <div
+                        key={ann.id}
+                        className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="space-y-1 max-w-xl">
+                          <div className="flex flex-wrap items-center gap-1.5 text-slate-500">
+                            <span
+                              className={
+                                ann.active
+                                  ? 'font-semibold text-emerald-700'
+                                  : 'font-semibold text-slate-400'
+                              }
+                            >
+                              {ann.active ? 'Publiée' : 'Masquée'}
+                            </span>
+                            <span>·</span>
+                            <span className="font-mono">{formatDateFR(ann.publishedAt, true)}</span>
+                            <span>·</span>
+                            <span>{ann.publishedBy}</span>
+                          </div>
+                          <h3 className="text-sm font-semibold text-slate-900">{ann.title}</h3>
+                          <p className="text-slate-600">{ann.message}</p>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => toggleAnnouncementActive(ann.id)}
+                          className="px-3 py-1.5 font-semibold text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg shrink-0 cursor-pointer"
+                        >
+                          {ann.active ? 'Masquer' : 'Publier'}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* SUBTAB 4: JOURNAL DE TRAÇABILITÉ */}
+            {commSubTab === 'journal' && (
+              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between text-xs">
+                  <span className="font-semibold text-slate-900">
+                    Historique des événements et notifications ({auditLogs.length})
+                  </span>
+                  <span className="text-slate-500">Traçabilité horodatée</span>
+                </div>
+                <div className="overflow-x-auto max-h-[540px] overflow-y-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
+                        <th className="py-2.5 px-4">Date & Heure</th>
+                        <th className="py-2.5 px-4">Acteur</th>
+                        <th className="py-2.5 px-4">Dossier</th>
+                        <th className="py-2.5 px-4">Opération</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {auditLogs.map((log) => (
+                        <tr key={log.id} className="hover:bg-slate-50">
+                          <td className="py-2.5 px-4 font-mono text-slate-500 whitespace-nowrap">
+                            {formatDateFR(log.timestamp, true)}
+                          </td>
+                          <td className="py-2.5 px-4 font-medium text-slate-900 whitespace-nowrap">
+                            {log.actorName}
+                          </td>
+                          <td className="py-2.5 px-4 font-mono text-blue-700 whitespace-nowrap">
+                            {log.dossierNumber || '—'}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-700">{log.summary}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: GESTION DES SUJETS */}
+        {activeTab === 'sujets' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+                Sujets de thèse ({subjects.length})
+              </h1>
               <button
                 type="button"
                 onClick={() => {
@@ -893,25 +1774,25 @@ export const AdminWorkspace: React.FC = () => {
                   });
                   setShowSubjectForm((v) => !v);
                 }}
-                className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors flex items-center gap-1.5 self-start"
+                className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
-                {showSubjectForm ? 'Fermer le formulaire' : 'Ajouter un sujet de thèse'}
+                {showSubjectForm ? 'Fermer' : 'Nouveau sujet'}
               </button>
             </div>
 
             {showSubjectForm && (
               <form
                 onSubmit={handleSaveSubject}
-                className="bg-white border border-slate-200 rounded-xl p-6 space-y-4"
+                className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
               >
-                <h2 className="text-base font-bold text-slate-900">
-                  {editingSubjectId ? 'Modifier le sujet de thèse' : 'Nouveau sujet de thèse'}
+                <h2 className="text-sm font-bold text-slate-900">
+                  {editingSubjectId ? 'Modifier le sujet' : 'Nouveau sujet'}
                 </h2>
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Code sujet *
+                      Code *
                     </label>
                     <input
                       type="text"
@@ -935,7 +1816,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Places ouvertes *
+                      Places *
                     </label>
                     <input
                       type="number"
@@ -955,45 +1836,42 @@ export const AdminWorkspace: React.FC = () => {
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Intitulé complet du sujet de thèse *
+                    Intitulé *
                   </label>
                   <input
                     type="text"
                     value={sujForm.title}
                     onChange={(e) => setSujForm({ ...sujForm, title: e.target.value })}
-                    placeholder="Intitulé scientifique..."
                     className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg"
                   />
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Directeur de thèse *
+                      Encadrant *
                     </label>
                     <input
                       type="text"
                       value={sujForm.supervisor}
                       onChange={(e) => setSujForm({ ...sujForm, supervisor: e.target.value })}
-                      placeholder="Pr. Nom Prénom"
                       className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Laboratoire d’accueil *
+                      Laboratoire *
                     </label>
                     <input
                       type="text"
                       value={sujForm.laboratoire}
                       onChange={(e) => setSujForm({ ...sujForm, laboratoire: e.target.value })}
-                      placeholder="Nom du laboratoire..."
                       className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Établissement USMBA *
+                      Établissement *
                     </label>
                     <input
                       type="text"
@@ -1004,10 +1882,10 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Validation Structure (Labo)
+                      Validation Structure
                     </label>
                     <select
                       value={sujForm.validationStatus?.structure || 'validee'}
@@ -1029,7 +1907,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Validation Centre (CEDoc)
+                      Validation Centre
                     </label>
                     <select
                       value={sujForm.validationStatus?.centre || 'validee'}
@@ -1051,7 +1929,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Validation Pôle Doctoral
+                      Validation Pôle
                     </label>
                     <select
                       value={sujForm.validationStatus?.pole || 'validee'}
@@ -1073,10 +1951,10 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Prérequis académiques
+                      Prérequis
                     </label>
                     <textarea
                       rows={2}
@@ -1087,7 +1965,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Description du sujet
+                      Description
                     </label>
                     <textarea
                       rows={2}
@@ -1102,114 +1980,99 @@ export const AdminWorkspace: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setShowSubjectForm(false)}
-                    className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg"
+                    className="px-3.5 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg cursor-pointer"
                   >
                     Annuler
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg"
+                    className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg cursor-pointer"
                   >
-                    Enregistrer le sujet
+                    Enregistrer
                   </button>
                 </div>
               </form>
             )}
 
             <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-              {subjects.map((suj) => {
-                const val = suj.validationStatus || {
-                  structure: 'validee',
-                  centre: 'validee',
-                  pole: 'validee',
-                };
-                return (
-                  <div
-                    key={suj.id}
-                    className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-                  >
-                    <div className="space-y-1 max-w-3xl">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                        <span className="font-mono font-semibold text-blue-700">{suj.code}</span>
-                        <span>·</span>
-                        <span>{suj.etablissement}</span>
-                        <span>·</span>
-                        <span className="font-mono">{suj.places} place(s)</span>
-                        <span>·</span>
-                        <span
-                          className={
-                            suj.open
-                              ? 'text-emerald-700 font-semibold'
-                              : 'text-red-700 font-semibold'
-                          }
-                        >
-                          {suj.open ? 'Ouvert aux candidatures' : 'Clôturé'}
-                        </span>
-                        <span>·</span>
-                        <span>
-                          Validation :{' '}
-                          {val.structure === 'validee' &&
-                          val.centre === 'validee' &&
-                          val.pole === 'validee'
-                            ? 'Structure · Centre · Pôle ✓'
-                            : 'Validation partielle'}
-                        </span>
-                      </div>
-                      <h3 className="text-sm font-bold text-slate-900">{suj.title}</h3>
-                      <p className="text-xs text-slate-600">
-                        {suj.supervisor} · {suj.laboratoire}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenEditSubject(suj)}
-                        className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1"
+              {subjects.map((suj) => (
+                <div
+                  key={suj.id}
+                  className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div className="space-y-1 max-w-3xl">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                      <span className="font-mono font-semibold text-blue-700">{suj.code}</span>
+                      <span>·</span>
+                      <span className="font-mono">{suj.places} place(s)</span>
+                      <span>·</span>
+                      <span
+                        className={
+                          suj.open ? 'text-emerald-700 font-semibold' : 'text-red-700 font-semibold'
+                        }
                       >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        Modifier
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => toggleSubjectOpen(suj.id)}
-                        className="px-3 py-1.5 text-xs font-semibold text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg"
-                      >
-                        {suj.open ? 'Clôturer' : 'Réouvrir'}
-                      </button>
+                        {suj.open ? 'Ouvert' : 'Clôturé'}
+                      </span>
                     </div>
+                    <h3 className="text-sm font-semibold text-slate-900">{suj.title}</h3>
+                    <p className="text-xs text-slate-600">
+                      {suj.supervisor} · {suj.laboratoire}
+                    </p>
                   </div>
-                );
-              })}
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditSubject(suj)}
+                      className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1 cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      Modifier
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => toggleSubjectOpen(suj.id)}
+                      className="px-3 py-1.5 text-xs font-semibold text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg cursor-pointer"
+                    >
+                      {suj.open ? 'Clôturer' : 'Ouvrir'}
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}
 
-        {/* TAB 4: CONFIGURATION DYNAMIQUE (PIÈCES, FORMATS, DATES LIMITES & RÈGLES) */}
+        {/* TAB 4: PARAMÈTRES */}
         {activeTab === 'configuration' && (
-          <div className="space-y-8">
-            <div>
-              <h1 className="text-xl font-bold text-slate-900">
-                Paramétrage de la campagne, du nombre de sujets et des pièces demandées
-              </h1>
-              <p className="text-xs text-slate-600 mt-1">
-                Adaptez les dates limites, le nombre de sujets choisis par candidat (par défaut 3), les pondérations et la liste des documents exigés selon l’établissement.
-              </p>
-            </div>
+          <div className="space-y-6">
+            <h1 className="text-lg sm:text-xl font-bold text-slate-900">Paramètres</h1>
 
-            {/* 1. Dates limites & Règles de sélection */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {/* Dates */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  updateCampaignSettings(calDraft, {
+                    notifyCandidates: notifyCalendarCandidates,
+                  });
+                  setBanner({
+                    tone: 'success',
+                    text: notifyCalendarCandidates
+                      ? 'Calendrier mis à jour et candidats notifiés.'
+                      : 'Calendrier mis à jour.',
+                  });
+                }}
+                className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+              >
                 <div className="flex items-center justify-between">
-                  <h2 className="text-base font-bold text-slate-900">
-                    Dates limites de la campagne
-                  </h2>
+                  <h2 className="text-sm font-bold text-slate-900">Calendrier universitaire</h2>
                   <button
                     type="button"
                     onClick={() =>
                       updateCampaignSettings({ campaignOpen: !campaignConfig.campaignOpen })
                     }
-                    className={`px-3 py-1 text-xs font-semibold rounded-md border ${
+                    className={`px-2.5 py-1 text-xs font-semibold rounded-md border cursor-pointer ${
                       campaignConfig.campaignOpen
                         ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                         : 'bg-red-50 border-red-200 text-red-800'
@@ -1219,15 +2082,13 @@ export const AdminWorkspace: React.FC = () => {
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">
-                      Ouverture des préinscriptions
-                    </label>
+                    <label className="block font-semibold text-slate-700 mb-1">Ouverture</label>
                     <input
                       type="date"
-                      value={campaignConfig.openDate}
-                      onChange={(e) => updateCampaignSettings({ openDate: e.target.value })}
+                      value={calDraft.openDate}
+                      onChange={(e) => setCalDraft({ ...calDraft, openDate: e.target.value })}
                       className="w-full px-3 py-2 font-mono border border-slate-200 rounded-lg"
                     />
                   </div>
@@ -1237,88 +2098,96 @@ export const AdminWorkspace: React.FC = () => {
                     </label>
                     <input
                       type="date"
-                      value={campaignConfig.submissionDeadline}
+                      value={calDraft.submissionDeadline}
                       onChange={(e) =>
-                        updateCampaignSettings({ submissionDeadline: e.target.value })
+                        setCalDraft({ ...calDraft, submissionDeadline: e.target.value })
                       }
                       className="w-full px-3 py-2 font-mono border border-slate-200 rounded-lg"
                     />
                   </div>
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">
-                      Période des entretiens
-                    </label>
+                    <label className="block font-semibold text-slate-700 mb-1">Entretiens</label>
                     <input
                       type="text"
-                      value={campaignConfig.interviewPeriod}
+                      value={calDraft.interviewPeriod}
                       onChange={(e) =>
-                        updateCampaignSettings({ interviewPeriod: e.target.value })
+                        setCalDraft({ ...calDraft, interviewPeriod: e.target.value })
                       }
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg"
                     />
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Limite d’inscription (Liste principale)
+                      Inscription définitive
                     </label>
                     <input
                       type="date"
-                      value={campaignConfig.enrollmentDeadline}
+                      value={calDraft.enrollmentDeadline}
                       onChange={(e) =>
-                        updateCampaignSettings({ enrollmentDeadline: e.target.value })
+                        setCalDraft({ ...calDraft, enrollmentDeadline: e.target.value })
                       }
                       className="w-full px-3 py-2 font-mono border border-slate-200 rounded-lg"
                     />
                   </div>
                   <div className="sm:col-span-2">
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Période d’inscription — Liste d’attente
+                      Liste d’attente
                     </label>
                     <input
                       type="text"
-                      value={campaignConfig.waitlistEnrollmentPeriod || ''}
+                      value={calDraft.waitlistEnrollmentPeriod}
                       onChange={(e) =>
-                        updateCampaignSettings({ waitlistEnrollmentPeriod: e.target.value })
+                        setCalDraft({ ...calDraft, waitlistEnrollmentPeriod: e.target.value })
                       }
-                      placeholder="Ex. Du 28 novembre au 04 décembre 2026"
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg"
                     />
                   </div>
                 </div>
-              </div>
 
-              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-                <h2 className="text-base font-bold text-slate-900">
-                  Règles de sélection, vœux et pondérations
-                </h2>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <label className="inline-flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={notifyCalendarCandidates}
+                      onChange={(e) => setNotifyCalendarCandidates(e.target.checked)}
+                    />
+                    Notifier automatiquement les candidats du changement
+                  </label>
+                  <button
+                    type="submit"
+                    className="px-3.5 py-1.5 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg cursor-pointer"
+                  >
+                    Enregistrer le calendrier
+                  </button>
+                </div>
+              </form>
+
+              {/* Rules */}
+              <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                <h2 className="text-sm font-bold text-slate-900">Règles de sélection</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="sm:col-span-2">
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Nombre de sujets de thèse à choisir par candidat
+                      Nombre de choix par candidat
                     </label>
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="number"
-                        min="1"
-                        max="5"
-                        value={campaignConfig.requiredSubjectChoices}
-                        onChange={(e) => {
-                          const val = Math.min(
-                            5,
-                            Math.max(1, Number.parseInt(e.target.value, 10) || 3)
-                          );
-                          updateCampaignSettings({ requiredSubjectChoices: val });
-                        }}
-                        className="w-24 px-3 py-2 font-mono font-bold border border-slate-200 rounded-lg"
-                      />
-                      <span className="text-slate-500">
-                        sujets requis par dossier (standard USMBA : 3 sujets par ordre de priorité).
-                      </span>
-                    </div>
+                    <input
+                      type="number"
+                      min="1"
+                      max="5"
+                      value={campaignConfig.requiredSubjectChoices}
+                      onChange={(e) => {
+                        const val = Math.min(
+                          5,
+                          Math.max(1, Number.parseInt(e.target.value, 10) || 3)
+                        );
+                        updateCampaignSettings({ requiredSubjectChoices: val });
+                      }}
+                      className="w-24 px-3 py-2 font-mono font-bold border border-slate-200 rounded-lg"
+                    />
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Pondération Dossier académique (%)
+                      Pondération dossier (%)
                     </label>
                     <input
                       type="number"
@@ -1337,7 +2206,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Pondération Entretien oral (%)
+                      Pondération entretien (%)
                     </label>
                     <input
                       type="number"
@@ -1356,7 +2225,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Moyenne minimale Bac+5 requise (/20)
+                      Moyenne min. Bac+5 (/20)
                     </label>
                     <input
                       type="number"
@@ -1374,7 +2243,7 @@ export const AdminWorkspace: React.FC = () => {
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
-                      Note éliminatoire d’entretien (/20)
+                      Seuil éliminatoire oral (/20)
                     </label>
                     <input
                       type="number"
@@ -1394,32 +2263,149 @@ export const AdminWorkspace: React.FC = () => {
               </div>
             </div>
 
-            {/* 2. Configuration des pièces justificatives demandées */}
+            {/* Deadlines, Reminders & SMTP Status */}
+            <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-blue-700" />
+                  <h2 className="text-sm font-bold text-slate-900">
+                    Gestion des délais de régularisation, rappels & e-mails
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const res = await runDeadlineCheck();
+                    setBanner({
+                      tone: 'success',
+                      text:
+                        res.generatedCount > 0
+                          ? `${res.generatedCount} rappel(s) ou alerte(s) généré(s).`
+                          : 'Aucun nouveau rappel à générer aujourd’hui.',
+                    });
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Vérifier les délais maintenant
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Délai par défaut de correction (jours)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={campaignConfig.deadlinePolicy.defaultCorrectionDays}
+                    onChange={(e) =>
+                      updateDeadlinePolicy({
+                        defaultCorrectionDays: Math.min(
+                          30,
+                          Math.max(1, Number.parseInt(e.target.value, 10) || 7)
+                        ),
+                      })
+                    }
+                    className="w-28 px-3 py-2 font-mono font-semibold border border-slate-200 rounded-lg"
+                  />
+                </div>
+
+                <div>
+                  <span className="block font-semibold text-slate-700 mb-1.5">
+                    Rappels automatiques avant expiration
+                  </span>
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    {[7, 3, 1].map((dayThreshold) => {
+                      const active =
+                        campaignConfig.deadlinePolicy.reminderDaysBefore.includes(dayThreshold);
+                      return (
+                        <label
+                          key={dayThreshold}
+                          className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={active}
+                            onChange={(e) => {
+                              const current = campaignConfig.deadlinePolicy.reminderDaysBefore;
+                              const next = e.target.checked
+                                ? Array.from(new Set([...current, dayThreshold])).sort(
+                                    (a, b) => b - a
+                                  )
+                                : current.filter((d) => d !== dayThreshold);
+                              updateDeadlinePolicy({ reminderDaysBefore: next });
+                            }}
+                          />
+                          J-{dayThreshold}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <span className="block font-semibold text-slate-700 mb-1">
+                    Canal e-mail (SMTP)
+                  </span>
+                  <p className="text-slate-600 pt-1">
+                    {emailStatus.configured ? (
+                      <span className="text-emerald-700 font-semibold">
+                        Actif ({emailStatus.host} · {emailStatus.fromAddress})
+                      </span>
+                    ) : (
+                      <span className="text-slate-500">
+                        Non configuré (variables SMTP absentes) — notifications internes actives.
+                      </span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <label className="inline-flex items-start sm:items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={campaignConfig.deadlinePolicy.autoRejectOnExpiredCorrection}
+                    onChange={(e) =>
+                      updateDeadlinePolicy({
+                        autoRejectOnExpiredCorrection: e.target.checked,
+                      })
+                    }
+                  />
+                  <span>
+                    Rejeter automatiquement un dossier en cas de délai de correction expiré
+                  </span>
+                </label>
+                <span className="text-slate-500">
+                  {campaignConfig.deadlinePolicy.autoRejectOnExpiredCorrection
+                    ? 'Règle active : rejet automatique après expiration.'
+                    : 'Désactivé (recommandé) : signalement administratif sans rejet automatique.'}
+                </span>
+              </div>
+            </div>
+
+            {/* Document Requirements */}
             <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-              <div className="p-6">
-                <h2 className="text-base font-bold text-slate-900">
-                  Pièces justificatives, caractère obligatoire et formats acceptés
-                </h2>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  Modifiez en direct les exigences documentaires : elles s’appliquent instantanément aux formulaires des candidats.
-                </p>
+              <div className="p-5">
+                <h2 className="text-sm font-bold text-slate-900">Pièces justificatives</h2>
               </div>
 
               {campaignConfig.documentRequirements.map((req) => (
                 <div
                   key={req.id}
-                  className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 text-xs"
+                  className="p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs"
                 >
-                  <div className="space-y-1 max-w-xl">
+                  <div className="space-y-0.5 max-w-xl">
                     <div className="flex items-center gap-2">
                       <span className="font-mono font-bold text-blue-700">{req.code}</span>
-                      <span className="font-bold text-sm text-slate-900">{req.label}</span>
+                      <span className="font-semibold text-sm text-slate-900">{req.label}</span>
                     </div>
-                    <p className="text-slate-600">{req.instructions}</p>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-3 shrink-0">
-                    {/* Stage selector */}
+                  <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                     <select
                       value={req.stage}
                       onChange={(e) =>
@@ -1430,26 +2416,24 @@ export const AdminWorkspace: React.FC = () => {
                       }
                       className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-md font-medium"
                     >
-                      <option value="preinscription">Étape : Préinscription</option>
-                      <option value="inscription">Étape : Inscription finale</option>
+                      <option value="preinscription">Préinscription</option>
+                      <option value="inscription">Inscription</option>
                     </select>
 
-                    {/* Required toggle */}
                     <button
                       type="button"
                       onClick={() =>
                         upsertDocumentRequirement({ ...req, required: !req.required })
                       }
-                      className={`px-2.5 py-1.5 rounded-md font-semibold border ${
+                      className={`px-2.5 py-1.5 rounded-md font-semibold border cursor-pointer ${
                         req.required
                           ? 'bg-blue-50 border-blue-200 text-blue-800'
                           : 'bg-slate-50 border-slate-200 text-slate-600'
                       }`}
                     >
-                      {req.required ? 'Obligatoire *' : 'Facultatif'}
+                      {req.required ? 'Obligatoire' : 'Facultatif'}
                     </button>
 
-                    {/* Accepted formats toggles */}
                     <div className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-md p-1">
                       {(['PDF', 'JPG', 'PNG'] as const).map((fmt) => {
                         const active = req.acceptedFormats.includes(fmt);
@@ -1465,7 +2449,7 @@ export const AdminWorkspace: React.FC = () => {
                                 upsertDocumentRequirement({ ...req, acceptedFormats: next });
                               }
                             }}
-                            className={`px-2 py-0.5 rounded font-mono font-semibold ${
+                            className={`px-2 py-0.5 rounded font-mono font-semibold cursor-pointer ${
                               active ? 'bg-slate-900 text-white' : 'text-slate-500'
                             }`}
                           >
@@ -1475,9 +2459,7 @@ export const AdminWorkspace: React.FC = () => {
                       })}
                     </div>
 
-                    {/* Max size MB */}
                     <div className="inline-flex items-center gap-1">
-                      <span className="text-slate-500">Max</span>
                       <input
                         type="number"
                         min="1"
@@ -1498,7 +2480,7 @@ export const AdminWorkspace: React.FC = () => {
                       type="button"
                       onClick={() => deleteDocumentRequirement(req.id)}
                       aria-label={`Supprimer ${req.label}`}
-                      className="p-1.5 text-slate-400 hover:text-red-700 rounded-md"
+                      className="p-1.5 text-slate-400 hover:text-red-700 rounded-md cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1506,60 +2488,43 @@ export const AdminWorkspace: React.FC = () => {
                 </div>
               ))}
 
-              {/* Add new document requirement */}
-              <form onSubmit={handleAddDocumentRequirement} className="p-6 bg-slate-50/70 space-y-4">
-                <h3 className="text-sm font-bold text-slate-900">
-                  Ajouter une nouvelle pièce demandée aux candidats
+              <form onSubmit={handleAddDocumentRequirement} className="p-5 bg-slate-50/70 space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Ajouter une pièce
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Code court *</label>
-                    <input
-                      type="text"
-                      value={newReqCode}
-                      onChange={(e) => setNewReqCode(e.target.value)}
-                      placeholder="Ex. AUTORISATION"
-                      className="w-full px-3 py-2 font-mono bg-white border border-slate-200 rounded-lg"
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="block font-semibold text-slate-700 mb-1">
-                      Intitulé de la pièce *
-                    </label>
-                    <input
-                      type="text"
-                      value={newReqLabel}
-                      onChange={(e) => setNewReqLabel(e.target.value)}
-                      placeholder="Ex. Attestation de non-emploi ou autorisation employeur"
-                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Étape</label>
-                    <select
-                      value={newReqStage}
-                      onChange={(e) => setNewReqStage(e.target.value as DocumentStage)}
-                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
-                    >
-                      <option value="preinscription">Préinscription</option>
-                      <option value="inscription">Inscription finale</option>
-                    </select>
-                  </div>
+                  <input
+                    type="text"
+                    value={newReqCode}
+                    onChange={(e) => setNewReqCode(e.target.value)}
+                    placeholder="Code (ex. ATTESTATION) *"
+                    className="px-3 py-2 font-mono bg-white border border-slate-200 rounded-lg"
+                  />
+                  <input
+                    type="text"
+                    value={newReqLabel}
+                    onChange={(e) => setNewReqLabel(e.target.value)}
+                    placeholder="Intitulé de la pièce *"
+                    className="sm:col-span-2 px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                  />
+                  <select
+                    value={newReqStage}
+                    onChange={(e) => setNewReqStage(e.target.value as DocumentStage)}
+                    className="px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                  >
+                    <option value="preinscription">Préinscription</option>
+                    <option value="inscription">Inscription</option>
+                  </select>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end text-xs">
-                  <div className="sm:col-span-5">
-                    <label className="block font-semibold text-slate-700 mb-1">
-                      Instructions d’aide affichées au candidat
-                    </label>
-                    <input
-                      type="text"
-                      value={newReqInstructions}
-                      onChange={(e) => setNewReqInstructions(e.target.value)}
-                      placeholder="Ex. Document daté de moins de 3 mois cacheté..."
-                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
-                    />
-                  </div>
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center text-xs">
+                  <input
+                    type="text"
+                    value={newReqInstructions}
+                    onChange={(e) => setNewReqInstructions(e.target.value)}
+                    placeholder="Consigne courte (optionnel)..."
+                    className="sm:col-span-5 px-3 py-2 bg-white border border-slate-200 rounded-lg"
+                  />
                   <div className="sm:col-span-3 flex items-center gap-2">
                     {(['PDF', 'JPG', 'PNG'] as const).map((fmt) => (
                       <label key={fmt} className="inline-flex items-center gap-1 font-mono">
@@ -1577,220 +2542,194 @@ export const AdminWorkspace: React.FC = () => {
                       </label>
                     ))}
                   </div>
-                  <div className="sm:col-span-2 flex items-center gap-1.5">
+                  <label className="sm:col-span-2 inline-flex items-center gap-1.5 font-semibold text-slate-700">
                     <input
                       type="checkbox"
-                      id="new-req-mandatory"
                       checked={newReqRequired}
                       onChange={(e) => setNewReqRequired(e.target.checked)}
                     />
-                    <label htmlFor="new-req-mandatory" className="font-semibold text-slate-700">
-                      Obligatoire
-                    </label>
-                  </div>
-                  <div className="sm:col-span-2">
-                    <button
-                      type="submit"
-                      className="w-full py-2 px-3 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg flex items-center justify-center gap-1"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      Ajouter
-                    </button>
-                  </div>
+                    Obligatoire
+                  </label>
+                  <button
+                    type="submit"
+                    className="sm:col-span-2 py-2 px-3 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg flex items-center justify-center gap-1 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Ajouter
+                  </button>
                 </div>
               </form>
             </div>
           </div>
         )}
 
-        {/* TAB 5: COMPTES CANDIDATS & INTERVENANTS */}
+        {/* TAB 5: UTILISATEURS */}
         {activeTab === 'comptes' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Create Intervenant */}
-              <form
-                onSubmit={handleCreateIntervenant}
-                className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-6 space-y-4"
-              >
-                <h2 className="text-base font-bold text-slate-900">
-                  Créer un compte intervenant (Commission / Admin)
-                </h2>
-                <div className="space-y-3 text-xs">
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Nom complet *</label>
-                    <input
-                      type="text"
-                      value={staffFullName}
-                      onChange={(e) => setStaffFullName(e.target.value)}
-                      placeholder="Pr. Sanae Bekkali"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">
-                      E-mail institutionnel *
-                    </label>
-                    <input
-                      type="email"
-                      value={staffEmail}
-                      onChange={(e) => setStaffEmail(e.target.value)}
-                      placeholder="s.bekkali@usmba.ac.ma"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block font-semibold text-slate-700 mb-1">Rôle</label>
-                      <select
-                        value={staffRole}
-                        onChange={(e) =>
-                          setStaffRole(e.target.value as 'commission' | 'admin')
-                        }
-                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
-                      >
-                        <option value="commission">Commission de sélection</option>
-                        <option value="admin">Administration CEDoc</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block font-semibold text-slate-700 mb-1">
-                        Établissement
-                      </label>
-                      <input
-                        type="text"
-                        value={staffEtab}
-                        onChange={(e) => setStaffEtab(e.target.value)}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-lg"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">
-                      Titre / Fonction
-                    </label>
-                    <input
-                      type="text"
-                      value={staffTitle}
-                      onChange={(e) => setStaffTitle(e.target.value)}
-                      placeholder="Membre de Commission Pédagogique"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">
-                      Laboratoire de rattachement
-                    </label>
-                    <input
-                      type="text"
-                      value={staffLab}
-                      onChange={(e) => setStaffLab(e.target.value)}
-                      placeholder="Ex. Laboratoire LIIAN"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    className="w-full py-2.5 px-4 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg"
-                  >
-                    Créer le compte intervenant
-                  </button>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            <form
+              onSubmit={handleCreateIntervenant}
+              className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 space-y-3.5"
+            >
+              <h2 className="text-sm font-bold text-slate-900">Nouvel intervenant</h2>
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Nom complet *</label>
+                  <input
+                    type="text"
+                    value={staffFullName}
+                    onChange={(e) => setStaffFullName(e.target.value)}
+                    placeholder="Pr. Nom Prénom"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                  />
                 </div>
-              </form>
-
-              {/* Accounts Directory */}
-              <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-                <div className="p-5">
-                  <h2 className="text-base font-bold text-slate-900">
-                    Comptes enregistrés sur la plateforme ({accounts.length})
-                  </h2>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">E-mail *</label>
+                  <input
+                    type="email"
+                    value={staffEmail}
+                    onChange={(e) => setStaffEmail(e.target.value)}
+                    placeholder="prenom.nom@usmba.ac.ma"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                  />
                 </div>
-                <div className="divide-y divide-slate-200 max-h-[520px] overflow-y-auto">
-                  {accounts.map((acc) => (
-                    <div
-                      key={acc.id}
-                      className="p-4 flex items-center justify-between gap-4 text-xs"
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Rôle</label>
+                    <select
+                      value={staffRole}
+                      onChange={(e) =>
+                        setStaffRole(e.target.value as 'commission' | 'admin')
+                      }
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg"
                     >
-                      <div className="min-w-0">
-                        <p className="font-bold text-slate-900 truncate">
-                          {acc.fullName} ·{' '}
-                          <span className="font-normal text-slate-500">
-                            {acc.role === 'candidat'
-                              ? `Candidat (${acc.cin || ''})`
-                              : acc.role === 'commission'
-                              ? 'Commission'
-                              : 'Administration'}
-                          </span>
-                        </p>
-                        <p className="text-slate-500 truncate">
-                          {acc.email} {acc.etablissement ? `· ${acc.etablissement}` : ''}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => toggleAccountActive(acc.id)}
-                        className={`px-3 py-1.5 rounded-md font-semibold shrink-0 border ${
-                          acc.active
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                            : 'bg-red-50 border-red-200 text-red-800'
-                        }`}
-                      >
-                        {acc.active ? 'Actif' : 'Suspendu'}
-                      </button>
-                    </div>
-                  ))}
+                      <option value="commission">Commission</option>
+                      <option value="admin">Administration</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Établissement</label>
+                    <input
+                      type="text"
+                      value={staffEtab}
+                      onChange={(e) => setStaffEtab(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                    />
+                  </div>
                 </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Fonction</label>
+                  <input
+                    type="text"
+                    value={staffTitle}
+                    onChange={(e) => setStaffTitle(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Laboratoire</label>
+                  <input
+                    type="text"
+                    value={staffLab}
+                    onChange={(e) => setStaffLab(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full py-2 px-4 font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg cursor-pointer"
+                >
+                  Créer le compte
+                </button>
+              </div>
+            </form>
+
+            <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
+              <div className="px-5 py-4">
+                <h2 className="text-sm font-bold text-slate-900">
+                  Utilisateurs ({accounts.length})
+                </h2>
+              </div>
+              <div className="divide-y divide-slate-200 max-h-[520px] overflow-y-auto">
+                {accounts.map((acc) => (
+                  <div
+                    key={acc.id}
+                    className="px-5 py-3.5 flex items-center justify-between gap-4 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 truncate">
+                        {acc.fullName} ·{' '}
+                        <span className="font-normal text-slate-500">
+                          {acc.role === 'candidat'
+                            ? `Candidat (${acc.cin || ''})`
+                            : acc.role === 'commission'
+                            ? 'Commission'
+                            : 'Administration'}
+                        </span>
+                      </p>
+                      <p className="text-slate-500 font-mono truncate">{acc.email}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleAccountActive(acc.id)}
+                      className={`px-2.5 py-1 rounded-md font-semibold shrink-0 border cursor-pointer ${
+                        acc.active
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                          : 'bg-red-50 border-red-200 text-red-800'
+                      }`}
+                    >
+                      {acc.active ? 'Actif' : 'Suspendu'}
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 6: TICKETS DE SUPPORT CANDIDATS */}
+        {/* TAB 6: SUPPORT */}
         {activeTab === 'support' && (
           <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
-            <div className="p-6">
-              <h1 className="text-lg font-bold text-slate-900">
-                Demandes d’assistance des candidats ({supportTickets.length})
+            <div className="px-5 py-4">
+              <h1 className="text-base font-bold text-slate-900">
+                Demandes d’assistance ({supportTickets.length})
               </h1>
-              <p className="text-xs text-slate-600 mt-0.5">
-                Répondez directement aux candidats rencontrant une difficulté technique ou administrative.
-              </p>
             </div>
 
             {supportTickets.map((ticket) => (
-              <div key={ticket.id} className="p-6 space-y-3">
+              <div key={ticket.id} className="p-5 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
                   <span>
                     <strong className="font-mono text-slate-900">{ticket.reference}</strong> ·{' '}
                     {ticket.senderName} ({ticket.senderEmail}){' '}
-                    {ticket.dossierNumber ? `· Dossier ${ticket.dossierNumber}` : ''}
+                    {ticket.dossierNumber ? `· ${ticket.dossierNumber}` : ''}
                   </span>
                   <span
                     className={`font-semibold ${
                       ticket.status === 'repondu' ? 'text-emerald-700' : 'text-amber-700'
                     }`}
                   >
-                    {ticket.status === 'repondu' ? '✓ Répondu' : 'En attente de réponse'}
+                    {ticket.status === 'repondu' ? 'Répondu' : 'Ouvert'}
                   </span>
                 </div>
-                <h3 className="text-sm font-bold text-slate-900">
+                <h3 className="text-sm font-semibold text-slate-900">
                   [{ticket.category}] {ticket.subject}
                 </h3>
-                <p className="text-sm text-slate-700">{ticket.message}</p>
+                <p className="text-xs sm:text-sm text-slate-600">{ticket.message}</p>
 
                 {ticket.reply ? (
-                  <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700">
-                    <strong>Réponse envoyée :</strong> {ticket.reply}
+                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700">
+                    <strong>Réponse :</strong> {ticket.reply}
                   </div>
                 ) : (
-                  <div className="flex flex-col sm:flex-row gap-2 pt-2">
+                  <div className="flex flex-col sm:flex-row gap-2 pt-1">
                     <input
                       type="text"
                       value={ticketReplies[ticket.id] || ''}
                       onChange={(e) =>
                         setTicketReplies({ ...ticketReplies, [ticket.id]: e.target.value })
                       }
-                      placeholder="Saisissez votre réponse officielle au candidat..."
-                      className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg"
+                      placeholder="Réponse..."
+                      className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded-lg"
                     />
                     <button
                       type="button"
@@ -1800,13 +2739,13 @@ export const AdminWorkspace: React.FC = () => {
                         replyToSupportTicket(ticket.id, text);
                         setBanner({
                           tone: 'success',
-                          text: `Réponse envoyée et notifiée à ${ticket.senderName}.`,
+                          text: 'Réponse envoyée.',
                         });
                       }}
-                      className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg flex items-center gap-1.5 shrink-0"
+                      className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg flex items-center gap-1.5 shrink-0 cursor-pointer"
                     >
                       <Send className="w-3.5 h-3.5" />
-                      Répondre au candidat
+                      Répondre
                     </button>
                   </div>
                 )}
