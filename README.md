@@ -208,5 +208,29 @@ Les notifications internes sont prévues dans l'application. L'envoi d'e-mails n
 
 ![Support administration](screenshots/administration/21-support-administration.png)
 
+# Modélisation UML
+
+La modélisation UML permet de représenter le fonctionnement de la plateforme, les différents états d'une candidature et la structure des données.
+
+## 1. Diagramme d'activité
+
+Représentation du processus de préinscription, de sélection et d'inscription au cycle doctoral.
+
+![Diagramme d'activité GCD](diagrammes/diagramme-activite-gcd.png)
+
+## 2. Diagramme d'états-transitions
+
+Représentation des différents états possibles d'une candidature, depuis sa création jusqu'à la décision finale et l'inscription.
+
+![Diagramme d'états-transitions GCD](diagrammes/diagramme-etats-transitions-gcd.png)
+
+## 3. Diagramme de classes
+
+Représentation simplifiée des principales classes métier et de leurs relations.
+
+![Diagramme de classes GCD](diagrammes/diagramme-classes-gcd-simple.png)
+
+---
+
 ---
 
