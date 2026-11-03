@@ -1,166 +1,212 @@
+
 # GCD USMBA — Gestion du Cycle Doctoral
 
-**Plateforme web de préinscription et d'inscription au cycle doctoral.**
+**Plateforme web de préinscription, de sélection et d'inscription au cycle doctoral**
 
-Projet pédagogique de conception et de développement d'une application web destinée à faciliter la gestion des candidatures au doctorat au sein de l'Université Sidi Mohamed Ben Abdellah (USMBA) de Fès.
+**Université Sidi Mohamed Ben Abdellah — Fès**
 
-> **Note :** Ce projet est un prototype de démonstration non officiel. Il ne constitue pas une plateforme institutionnelle de l'USMBA. Les données et les scénarios présentés sont illustratifs.
+> Projet académique de conception et de développement d'une plateforme de gestion du cycle doctoral. Prototype pédagogique non officiel.
 
-## 1. Présentation du projet
+---
 
-L'application GCD USMBA propose une interface centralisée pour accompagner les candidats dans leur parcours de préinscription et d'inscription au cycle doctoral.
+## Présentation du projet
 
-Elle permet également aux commissions de sélection d'examiner les candidatures, d'organiser les entretiens et d'établir les classements.
+GCD USMBA est une application web destinée à faciliter la gestion des candidatures au cycle doctoral.
 
-La plateforme est organisée autour de trois espaces :
-- Espace Candidat
-- Espace Commission de sélection
-- Espace Administration
+La plateforme centralise les opérations de préinscription, de sélection, de suivi des dossiers et d'inscription définitive.
 
-## 2. Objectifs du projet
+Elle propose une interface simple, moderne et intuitive, organisée autour de trois espaces :
 
-- Digitaliser le processus de préinscription au doctorat.
-- Simplifier la constitution et le suivi des dossiers.
+- **Espace Candidat**
+- **Espace Commission de sélection**
+- **Espace Administration CEDoc**
+
+## Objectifs
+
+- Digitaliser le processus de préinscription et d'inscription.
+- Simplifier la gestion des dossiers de candidature.
 - Permettre la sélection de trois sujets de thèse par ordre de priorité.
-- Faciliter la gestion des candidatures et des entretiens.
-- Centraliser les évaluations et les classements.
-- Illustrer la procédure de validation administrative.
+- Faciliter l'examen et le classement des candidatures.
+- Gérer les entretiens et les résultats de sélection.
+- Informer les candidats des changements de leur dossier.
+- Assurer le suivi des documents, des corrections et des délais.
+- Centraliser les opérations administratives.
 
-## 3. Fonctionnalités principales
+---
 
-### Espace Candidat
-- Consultation des sujets de thèse disponibles.
-- Création et gestion du dossier de candidature.
+## Fonctionnalités principales
+
+### 1. Espace Candidat
+
+- Création d'un compte et connexion.
+- Consultation du catalogue des sujets de thèse.
+- Préinscription en ligne.
 - Saisie des informations personnelles et universitaires.
 - Sélection de trois sujets par ordre de priorité.
 - Dépôt des pièces justificatives.
 - Enregistrement du dossier en brouillon.
-- Suivi de la progression de candidature.
+- Suivi de la progression et du statut.
+- Consultation des notifications.
+- Correction des documents non conformes.
+- Consultation des convocations et des résultats.
+
+### 2. Espace Commission de sélection
+
+- Consultation des candidatures.
+- Regroupement des candidatures par sujet.
+- Examen des dossiers universitaires.
+- Vérification des pièces justificatives.
+- Présélection des candidats.
+- Gestion du planning des entretiens.
+- Évaluation des dossiers et des entretiens.
+- Classement des candidats par sujet.
+- Gestion des listes principales et d'attente.
+- Exportation des résultats au format CSV.
 - Consultation des notifications.
 
-### Espace Commission de sélection
-- Consultation des candidatures regroupées par sujet.
-- Examen scientifique des dossiers.
-- Présélection des candidats.
-- Planning des entretiens.
-- Évaluation et classement des candidatures.
-- Gestion des listes principales et d'attente.
-- Export des résultats au format CSV.
+### 3. Espace Administration CEDoc
 
-### Espace Administration
-- Suivi des candidatures.
-- Gestion des règles et des paramètres.
-- Vérification des pièces administratives.
+- Tableau de bord général.
+- Suivi des candidatures et des inscriptions.
+- Vérification et validation des documents.
+- Demandes de correction avec justification.
+- Gestion et prolongation des délais.
+- Envoi de notifications et d'annonces.
+- Gestion des sujets de thèse.
+- Configuration du calendrier universitaire.
+- Paramétrage des règles de sélection.
+- Gestion des utilisateurs.
+- Suivi des demandes de support.
 - Validation des inscriptions définitives.
-
-## 4. Diagramme d'activité UML
-
-Le diagramme représente le processus de préinscription et d'inscription au cycle doctoral ainsi que les interactions entre le candidat, la plateforme GCD, la commission de sélection et l'administration.
-
-![Diagramme d'activité UML GCD](diagramme_acteurs_GCD.png)
-
-## 5. Captures d'écran de l'application
-
-### 5.1 Page d'accueil
-
-![Page d'accueil](screenshots/accueil.png)
-
-### 5.2 Catalogue des sujets de thèse
-
-![Catalogue des sujets](screenshots/catalogue-sujets.png)
-
-### 5.3 Espaces de démonstration
-
-![Espaces de démonstration](screenshots/espaces-demo.png)
-
-### 5.4 Suivi et progression du candidat
-
-![Suivi de candidature](screenshots/suivi-candidature.png)
-
-### 5.5 Informations et parcours
-
-![Informations et parcours](screenshots/informations-parcours.png)
-
-### 5.6 Sélection des sujets
-
-![Choix des sujets](screenshots/choix-sujets.png)
-
-### 5.7 Pièces justificatives
-
-![Pièces justificatives](screenshots/pieces-justificatives.png)
-
-### 5.8 Notifications
-
-![Notifications](screenshots/notifications.png)
-
-### 5.9 Conseils aux candidats
-
-![Conseils aux candidats](screenshots/conseils-candidats.png)
-
-### 5.10 Commission — Candidatures par sujet
-
-![Candidatures par sujet](screenshots/commission-par-sujet.png)
-
-### 5.11 Commission — Examen des candidatures
-
-![Examen des candidatures](screenshots/examen-candidatures.png)
-
-### 5.12 Commission — Planning des entretiens
-
-![Planning des entretiens](screenshots/planning-entretiens.png)
-
-### 5.13 Commission — Évaluation et classement
-
-![Évaluation et classement](screenshots/evaluation-classement.png)
-
-## 6. Processus de fonctionnement
-
-1. Le candidat accède à la plateforme.
-2. Il prépare son dossier et choisit ses sujets de thèse.
-3. Il soumet sa candidature.
-4. La commission examine son dossier.
-5. Les candidats présélectionnés participent aux entretiens.
-6. La commission évalue et classe les candidats.
-7. Les candidats admis préparent leurs dossiers définitifs.
-8. L'administration vérifie les pièces et valide les inscriptions conformes.
-
-
-## 7. Technologies et outils
-
-### Frontend
-- React.js
-- TypeScript
-- Vite
-- Tailwind CSS
-- Lucide React (icônes)
-- Motion (animations)
-
-### Backend et intégrations
-- Express.js (dépendance du projet)
-- Google GenAI SDK
-
-### Outils de développement
-- Google AI Studio
-- Git et GitHub
-- UML
-- Markdown
-
-### Architecture
-Application web développée avec React et TypeScript,
-utilisant Vite pour le développement et la compilation.
-
-## 8. Statut du projet
-
-**Prototype pédagogique de démonstration.**
-
-Ce projet présente les interfaces et les parcours principaux de gestion du cycle doctoral. Les tests techniques et la validation pour un environnement de production restent à effectuer.
-
-## 9. Auteur
-
-Projet réalisé dans un cadre pédagogique.
-
-**Auteur :** **Mohammed Eddarraz**.
 
 ---
 
-**GCD USMBA — Prototype de gestion du cycle doctoral**
+## Système de notifications et gestion des délais
+
+La plateforme intègre un système de notifications permettant d'informer les utilisateurs des événements importants.
+
+### Notifications
+
+- Changement du statut d'une candidature.
+- Publication des résultats.
+- Convocation à un entretien.
+- Modification d'une date importante.
+- Document manquant ou non conforme.
+- Demande de correction.
+- Prolongation d'un délai.
+- Rappel avant une date limite.
+
+### Gestion des délais
+
+L'administration peut définir une date limite pour corriger un document et préciser le motif de régularisation.
+
+Les candidats peuvent consulter les délais associés à leurs dossiers.
+
+Le système prévoit des rappels configurables :
+
+- **J-7** : sept jours avant l'échéance.
+- **J-3** : trois jours avant l'échéance.
+- **J-1** : un jour avant l'échéance.
+
+Les notifications internes sont prévues dans l'application. L'envoi d'e-mails nécessite une configuration SMTP et le fonctionnement du backend.
+
+---
+
+# Captures d'écran de l'application
+
+## I. Interface publique et Espace Candidat
+
+### 1. Page d'accueil
+
+![Accueil GCD USMBA](screenshots/candidat/01-accueil.png)
+
+### 2. Catalogue des sujets de thèse
+
+![Catalogue des sujets](screenshots/candidat/02-catalogue-sujets.png)
+
+### 3. Connexion
+
+![Page de connexion](screenshots/candidat/03-connexion.png)
+
+### 4. Préinscription
+
+![Formulaire de préinscription](screenshots/candidat/04-preinscription.png)
+
+### 5. Tableau de bord du candidat
+
+![Tableau de bord candidat](screenshots/candidat/05-tableau-bord-candidat.png)
+
+### 6. Gestion du dossier
+
+![Dossier de candidature](screenshots/candidat/06-dossier-candidat.png)
+
+### 7. Choix des sujets de thèse
+
+![Choix des sujets](screenshots/candidat/07-choix-sujets.png)
+
+### 8. Pièces justificatives
+
+![Pièces jointes](screenshots/candidat/08-pieces-jointes.png)
+
+### 9. Notifications du candidat
+
+![Notifications candidat](screenshots/candidat/09-notifications.png)
+
+---
+
+## II. Espace Commission de sélection
+
+### 10. Examen des candidatures
+
+![Examen des candidatures](screenshots/commission/10-candidatures-commission.png)
+
+### 11. Candidatures regroupées par sujet
+
+![Candidatures par sujet](screenshots/commission/11-par-sujet-commission.png)
+
+### 12. Planning des entretiens
+
+![Planning des entretiens](screenshots/commission/12-entretiens-commission.png)
+
+### 13. Évaluation et classement
+
+![Classement par sujet](screenshots/commission/13-classement-commission.png)
+
+### 14. Notifications de la commission
+
+![Notifications commission](screenshots/commission/14-notifications-commission.png)
+
+---
+
+## III. Espace Administration
+
+### 15. Tableau de bord administratif
+
+![Vue d'ensemble administration](screenshots/administration/15-vue-ensemble-administration.png)
+
+### 16. Gestion des candidatures et pièces
+
+![Gestion des candidatures](screenshots/administration/16-candidatures-pieces-administration.png)
+
+### 17. Notifications et annonces
+
+![Notifications administration](screenshots/administration/17-notifications-annonces-administration.png)
+
+### 18. Gestion des sujets de thèse
+
+![Gestion des sujets](screenshots/administration/18-sujets-administration.png)
+
+### 19. Paramètres et règles de sélection
+
+![Paramètres de la campagne](screenshots/administration/19-parametres-administration.png)
+
+### 20. Gestion des utilisateurs
+
+![Gestion des utilisateurs](screenshots/administration/20-utilisateurs-administration.png)
+
+### 21. Gestion du support
+
+![Support administration](screenshots/administration/21-support-administration.png)
+
+---
+
